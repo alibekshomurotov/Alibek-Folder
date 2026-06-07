@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 import sys
 
 from aiogram import Bot, Dispatcher
@@ -22,6 +23,25 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+async def start_health_server():
+    """Start a simple HTTP health check server for Render Web Service"""
+    from aiohttp import web
+
+    async def health_handler(request):
+        return web.Response(text="OK - Video Downloader Pro bot is running", status=200)
+
+    app = web.Application()
+    app.router.add_get("/", health_handler)
+    app.router.add_get("/health", health_handler)
+
+    port = int(os.getenv("PORT", 10000))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logger.info(f"Health check server started on port {port}")
+
+
 async def main():
     """Main function to start the bot"""
     # Validate config
@@ -33,6 +53,9 @@ async def main():
     logger.info("Initializing database...")
     await init_db()
     logger.info("Database initialized.")
+
+    # Start health check server (required for Render Web Service)
+    await start_health_server()
 
     # Create bot and dispatcher
     bot = Bot(
@@ -80,31 +103,13 @@ async def main():
     else:
         logger.warning("FFmpeg not found - limited quality support (pre-merged formats only)")
 
-    # Start polling or webhook
-    if config.webhook.enabled and config.webhook.url:
-        logger.info(f"Starting webhook mode at {config.webhook.url}")
-        await bot.set_webhook(
-            url=config.webhook.url,
-            drop_pending_updates=True,
-        )
-        from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-        from aiohttp import web
-
-        app = web.Application()
-        SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path="/webhook")
-        setup_application(app, dp, bot=bot)
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, config.webhook.host, config.webhook.port)
-        await site.start()
-        await asyncio.Event().wait()
-    else:
-        logger.info("Starting polling mode...")
-        await bot.delete_webhook(drop_pending_updates=True)
-        try:
-            await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
-        finally:
-            await close_db()
+    # Start polling
+    logger.info("Starting polling mode...")
+    await bot.delete_webhook(drop_pending_updates=True)
+    try:
+        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+    finally:
+        await close_db()
 
 
 if __name__ == "__main__":
