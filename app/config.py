@@ -55,6 +55,13 @@ class DownloadConfig:
 
     def __post_init__(self):
         self.ffmpeg_available = shutil.which("ffmpeg") is not None
+        # Also check project directory for static ffmpeg (Render deployment)
+        if not self.ffmpeg_available:
+            project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            local_ffmpeg = os.path.join(project_dir, "ffmpeg")
+            if os.path.isfile(local_ffmpeg) and os.access(local_ffmpeg, os.X_OK):
+                self.ffmpeg_available = True
+                os.environ["PATH"] = project_dir + ":" + os.environ.get("PATH", "")
 
 
 @dataclass
