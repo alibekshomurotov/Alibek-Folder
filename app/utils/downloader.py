@@ -15,6 +15,21 @@ from app.config import config, SUPPORTED_PLATFORMS
 logger = logging.getLogger(__name__)
 
 
+def _find_cookies_file() -> Optional[str]:
+    """Find cookies.txt in multiple possible locations"""
+    possible_paths = [
+        config.download.cookies_file,  # Default path from config
+        os.path.join(os.getcwd(), "cookies.txt"),  # Current working directory
+        "/etc/secrets/cookies.txt",  # Render Secret Files location
+        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "cookies.txt"),
+    ]
+    for path in possible_paths:
+        if path and os.path.exists(path):
+            logger.info(f"Found cookies file at: {path}")
+            return path
+    return None
+
+
 def detect_platform(url: str) -> Optional[str]:
     """Detect the platform from a URL"""
     try:
@@ -46,11 +61,23 @@ def get_format_selector(quality: str = "720", audio_only: bool = False) -> str:
     height = quality.replace("p", "")
 
     if config.download.ffmpeg_available:
-        # With FFmpeg: merge best video + audio
-        return f"bestvideo[height<={height}]+bestaudio/best[height<={height}]/best"
+        # With FFmpeg: merge best video + audio with fallback chain
+        return (
+            f"bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]/"
+            f"bestvideo[height<={height}]+bestaudio/"
+            f"best[height<={height}][ext=mp4]/"
+            f"best[height<={height}]/"
+            f"best[ext=mp4]/"
+            f"best"
+        )
     else:
-        # Without FFmpeg: pre-merged formats only
-        return f"best[height<={height}][ext=mp4]/best[height<={height}]/best[ext=mp4]/best"
+        # Without FFmpeg: pre-merged formats only with fallback
+        return (
+            f"best[height<={height}][ext=mp4]/"
+            f"best[height<={height}]/"
+            f"best[ext=mp4]/"
+            f"best"
+        )
 
 
 def get_ydl_opts(quality: str = "720", audio_only: bool = False,
@@ -75,9 +102,10 @@ def get_ydl_opts(quality: str = "720", audio_only: bool = False,
         "max_filesize": config.download.max_file_size_mb * 1024 * 1024,
     }
 
-    # Cookie support
-    if os.path.exists(config.download.cookies_file):
-        opts["cookiefile"] = config.download.cookies_file
+    # Cookie support - search multiple locations
+    cookies_path = _find_cookies_file()
+    if cookies_path:
+        opts["cookiefile"] = cookies_path
 
     # Audio-only post-processing
     if audio_only and config.download.ffmpeg_available:
@@ -103,10 +131,14 @@ async def extract_video_info(url: str) -> Optional[Dict[str, Any]]:
         "no_warnings": True,
         "extract_flat": False,
         "noplaylist": True,
+        # Use very permissive format for info extraction
+        "format": "best/bestvideo+bestaudio",
     }
 
-    if os.path.exists(config.download.cookies_file):
-        opts["cookiefile"] = config.download.cookies_file
+    # Cookie support - search multiple locations
+    cookies_path = _find_cookies_file()
+    if cookies_path:
+        opts["cookiefile"] = cookies_path
 
     proxy = os.getenv("HTTP_PROXY") or os.getenv("HTTPS_PROXY")
     if proxy:
@@ -118,7 +150,15 @@ async def extract_video_info(url: str) -> Optional[Dict[str, Any]]:
             return info
     except Exception as e:
         logger.error(f"Error extracting video info: {e}")
-        return None
+        # Try again with even more permissive format
+        try:
+            opts["format"] = "worst/best"
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                return info
+        except Exception as e2:
+            logger.error(f"Second attempt also failed: {e2}")
+            return None
 
 
 async def download_video(url: str, quality: str = "720",
@@ -166,7 +206,26 @@ async def download_video(url: str, quality: str = "720",
         return None
     except yt_dlp.utils.DownloadError as e:
         logger.error(f"Download error: {e}")
-        return None
+        # Try with simpler format as fallback
+        try:
+            output_path2 = tempfile.mkdtemp()
+            opts2 = get_ydl_opts(quality, audio_only, output_path2)
+            opts2["format"] = "best[ext=mp4]/best"
+            with yt_dlp.YoutubeDL(opts2) as ydl:
+                info = ydl.extract_info(url, download=True)
+                if info is None:
+                    return None
+                file_path = ydl.prepare_filename(info)
+                if not os.path.exists(file_path):
+                    files = os.listdir(output_path2)
+                    if files:
+                        file_path = os.path.join(output_path2, files[0])
+                    else:
+                        return None
+                return file_path, info
+        except Exception as fallback_err:
+            logger.error(f"Fallback download also failed: {fallback_err}")
+            return None
     except Exception as e:
         logger.error(f"Unexpected download error: {e}")
         return None
