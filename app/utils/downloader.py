@@ -61,9 +61,10 @@ def get_format_selector(quality: str = "720", audio_only: bool = False) -> str:
     height = quality.replace("p", "")
 
     if config.download.ffmpeg_available:
-        # With FFmpeg: merge best video + audio with fallback chain
+        # With FFmpeg: merge best video + audio, FFmpeg converts to mp4
+        # NOTE: Do NOT use [ext=mp4] on bestvideo — YouTube often serves
+        # video-only streams as webm; FFmpeg will merge & convert to mp4.
         return (
-            f"bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]/"
             f"bestvideo[height<={height}]+bestaudio/"
             f"best[height<={height}][ext=mp4]/"
             f"best[height<={height}]/"
@@ -101,6 +102,11 @@ def get_ydl_opts(quality: str = "720", audio_only: bool = False,
         "noplaylist": True,
         "max_filesize": config.download.max_file_size_mb * 1024 * 1024,
     }
+
+    # When FFmpeg is available and format uses + (video+audio merge),
+    # ensure the final output is mp4 regardless of input format
+    if config.download.ffmpeg_available and "+" in format_selector:
+        opts["merge_output_format"] = "mp4"
 
     # Cookie support - search multiple locations
     cookies_path = _find_cookies_file()
@@ -150,9 +156,9 @@ async def extract_video_info(url: str) -> Optional[Dict[str, Any]]:
             return info
     except Exception as e:
         logger.error(f"Error extracting video info: {e}")
-        # Try again with even more permissive format
+        # Try again with the most permissive format possible
         try:
-            opts["format"] = "worst/best"
+            opts["format"] = "best"
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
                 return info
@@ -210,7 +216,7 @@ async def download_video(url: str, quality: str = "720",
         try:
             output_path2 = tempfile.mkdtemp()
             opts2 = get_ydl_opts(quality, audio_only, output_path2)
-            opts2["format"] = "best[ext=mp4]/best"
+            opts2["format"] = "best"
             with yt_dlp.YoutubeDL(opts2) as ydl:
                 info = ydl.extract_info(url, download=True)
                 if info is None:
