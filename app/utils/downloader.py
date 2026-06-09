@@ -1,3 +1,5 @@
+"""Video/Audio Downloader using yt-dlp"""
+
 import os
 import logging
 import shutil
@@ -32,16 +34,15 @@ def _find_cookies_file() -> Optional[str]:
     if _cookies_path is not None:
         if os.path.exists(_cookies_path):
             return _cookies_path
-        # Cached path no longer exists, reset
         _cookies_path = None
 
     # Search in multiple locations
     possible_paths = [
-        config.download.cookies_file,  # Default path from config
-        os.path.join(os.getcwd(), "cookies.txt"),  # Current working directory
-        "/etc/secrets/cookies.txt",  # Render Secret Files location
+        config.download.cookies_file,
+        os.path.join(os.getcwd(), "cookies.txt"),
+        "/etc/secrets/cookies.txt",
         os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "cookies.txt"),
-        "cookies.txt",  # Relative path
+        "cookies.txt",
     ]
 
     for path in possible_paths:
@@ -64,7 +65,6 @@ def _find_cookies_file() -> Optional[str]:
             logger.error(f"[COOKIES] Failed to create cookies from env var: {e}")
 
     logger.warning("[COOKIES] No cookies.txt found! YouTube may not work without cookies.")
-    logger.warning("[COOKIES] Searched paths: %s", [p for p in possible_paths if p])
     return None
 
 
@@ -76,12 +76,10 @@ def log_cookies_status() -> None:
         try:
             with open(path, "r") as f:
                 lines = f.readlines()
-            # Count YouTube-related cookies
             yt_cookies = [l for l in lines if "youtube.com" in l.lower() and not l.startswith("#")]
             ig_cookies = [l for l in lines if "instagram.com" in l.lower() and not l.startswith("#")]
             logger.info(f"[COOKIES] File: {path} | Total lines: {len(lines)} | YouTube cookies: {len(yt_cookies)} | Instagram cookies: {len(ig_cookies)}")
 
-            # Check for critical YouTube cookies
             cookie_text = "".join(lines)
             critical_cookies = ["__Secure-1PSID", "__Secure-3PSID", "SID", "HSID", "SSID", "SAPISID"]
             found_critical = [c for c in critical_cookies if c in cookie_text]
@@ -91,9 +89,7 @@ def log_cookies_status() -> None:
                 logger.info(f"[COOKIES] YouTube critical cookies found: {found_critical}")
             if missing_critical:
                 logger.warning(f"[COOKIES] YouTube critical cookies MISSING: {missing_critical}")
-                logger.warning("[COOKIES] YouTube 'Sign in' error likely! Export fresh cookies from browser.")
 
-            # Check if cookies might be expired
             now = time.time()
             expired_count = 0
             for line in lines:
@@ -136,7 +132,12 @@ def is_video_url(url: str) -> bool:
 
 
 def get_format_selector(quality: str = "720", audio_only: bool = False) -> str:
-    """Get yt-dlp format selector based on quality and FFmpeg availability"""
+    """Get yt-dlp format selector based on quality and FFmpeg availability.
+    
+    IMPORTANT: YouTube mostly serves adaptive formats (separate video+audio).
+    "best" alone fails if no pre-merged format exists.
+    We must use "bestvideo+bestaudio/best" as the primary selector.
+    """
     if audio_only:
         if config.download.ffmpeg_available:
             return "bestaudio/best"
@@ -146,16 +147,16 @@ def get_format_selector(quality: str = "720", audio_only: bool = False) -> str:
     height = quality.replace("p", "")
 
     if config.download.ffmpeg_available:
-        # With FFmpeg: merge best video + audio, FFmpeg converts to mp4
+        # With FFmpeg: merge best video + audio streams
+        # bestvideo+bestaudio works even when no pre-merged format exists
         return (
             f"bestvideo[height<={height}]+bestaudio/"
-            f"best[height<={height}][ext=mp4]/"
+            f"bestvideo+bestaudio/"
             f"best[height<={height}]/"
-            f"best[ext=mp4]/"
             f"best"
         )
     else:
-        # Without FFmpeg: pre-merged formats only with fallback
+        # Without FFmpeg: pre-merged formats only
         return (
             f"best[height<={height}][ext=mp4]/"
             f"best[height<={height}]/"
@@ -164,14 +165,14 @@ def get_format_selector(quality: str = "720", audio_only: bool = False) -> str:
         )
 
 
-def get_ydl_opts(quality: str = "720", audio_only: bool = False,
-                 output_path: str = None, use_cookies: bool = True,
-                 youtube_mode: bool = False) -> Dict[str, Any]:
+def _build_ydl_opts(output_path: str = None, quality: str = "720",
+                    audio_only: bool = False, use_cookies: bool = True,
+                    format_override: str = None) -> Dict[str, Any]:
     """Build yt-dlp options dict"""
     if output_path is None:
         output_path = tempfile.mkdtemp()
 
-    format_selector = get_format_selector(quality, audio_only)
+    format_selector = format_override or get_format_selector(quality, audio_only)
 
     opts = {
         "format": format_selector,
@@ -188,11 +189,11 @@ def get_ydl_opts(quality: str = "720", audio_only: bool = False,
     }
 
     # When FFmpeg is available and format uses + (video+audio merge),
-    # ensure the final output is mp4 regardless of input format
+    # ensure the final output is mp4
     if config.download.ffmpeg_available and "+" in format_selector:
         opts["merge_output_format"] = "mp4"
 
-    # Cookie support - only if use_cookies is True
+    # Cookie support
     if use_cookies:
         cookies_path = _find_cookies_file()
         if cookies_path:
@@ -205,9 +206,8 @@ def get_ydl_opts(quality: str = "720", audio_only: bool = False,
             "preferredcodec": "mp3",
             "preferredquality": "192",
         }]
-        opts["outtmpl"] = os.path.join(output_path, "%(id)s.%(ext)s")
 
-    # Proxy support (optional)
+    # Proxy support
     proxy = os.getenv("HTTP_PROXY") or os.getenv("HTTPS_PROXY")
     if proxy:
         opts["proxy"] = proxy
@@ -215,17 +215,13 @@ def get_ydl_opts(quality: str = "720", audio_only: bool = False,
     return opts
 
 
-def _try_extract(url: str, opts: Dict[str, Any], label: str) -> Optional[Dict[str, Any]]:
-    """Try extracting video info with given options. Returns info or None."""
-    try:
-        logger.info(f"[YouTube] {label}")
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            logger.info(f"[YouTube] SUCCESS with {label}")
-            return info
-    except Exception as e:
-        logger.warning(f"[YouTube] {label} failed: {str(e)[:150]}")
-        return None
+# Format strings to try for YouTube (ordered by compatibility)
+# The key issue: "best" alone fails when no pre-merged format exists
+_YT_FORMAT_STRINGS = [
+    "bestvideo+bestaudio/best",     # Merge separate streams, fallback to pre-merged
+    "bestvideo+bestaudio",          # Merge separate streams only
+    "best",                          # Single pre-merged file (may fail on YouTube)
+]
 
 
 async def extract_video_info(url: str) -> Optional[Dict[str, Any]]:
@@ -237,13 +233,12 @@ async def extract_video_info(url: str) -> Optional[Dict[str, Any]]:
     proxy = os.getenv("HTTP_PROXY") or os.getenv("HTTPS_PROXY")
 
     if not is_youtube:
-        # Non-YouTube: simple extraction with cookies
         opts = {
             "quiet": True,
             "no_warnings": True,
             "extract_flat": False,
             "noplaylist": True,
-            "format": "best",
+            "format": "bestvideo+bestaudio/best",
         }
         if cookies_path:
             opts["cookiefile"] = cookies_path
@@ -257,58 +252,31 @@ async def extract_video_info(url: str) -> Optional[Dict[str, Any]]:
             logger.error(f"Error extracting info from {platform}: {e}")
             return None
 
-    # YouTube extraction strategy:
-    # We try multiple approaches because YouTube frequently breaks things.
-    # The "Failed to extract any player response" error means yt-dlp
-    # couldn't parse YouTube's response — usually a version issue.
-    # We try: extractor_args first, then without, then with different formats.
-
+    # YouTube: try multiple format strings with and without cookies
+    # The issue: yt-dlp 2025.5.22 has broken extractor_args support
+    # Solution: DON'T use extractor_args, just try different format strings
+    
     attempts = []
 
-    # Strategy 1: With extractor_args (works on newer yt-dlp)
+    # Phase 1: With cookies (most likely to work for bot detection bypass)
     if cookies_path:
-        attempts.append(("with cookies + web client", {
-            "cookiefile": cookies_path,
-            "extractor_args": {"youtube": {"player_client": ["web"]}},
-        }))
-        attempts.append(("with cookies + ios client", {
-            "cookiefile": cookies_path,
-            "extractor_args": {"youtube": {"player_client": ["ios"]}},
-        }))
+        for fmt in _YT_FORMAT_STRINGS:
+            attempts.append((f"cookies + format={fmt}", {
+                "cookiefile": cookies_path,
+                "format": fmt,
+            }))
 
-    # Strategy 2: Without extractor_args (works on older yt-dlp)
-    if cookies_path:
-        attempts.append(("with cookies, no extractor_args", {
-            "cookiefile": cookies_path,
-            "format": "bestvideo+bestaudio/best",
+    # Phase 2: Without cookies (for public videos)
+    for fmt in _YT_FORMAT_STRINGS:
+        attempts.append((f"no cookies + format={fmt}", {
+            "format": fmt,
         }))
-        attempts.append(("with cookies, format=best", {
-            "cookiefile": cookies_path,
-            "format": "best",
-        }))
-
-    # Strategy 3: Without cookies at all (iOS/Android clients don't always need them)
-    attempts.append(("no cookies + ios client", {
-        "extractor_args": {"youtube": {"player_client": ["ios"]}},
-    }))
-    attempts.append(("no cookies + android client", {
-        "extractor_args": {"youtube": {"player_client": ["android"]}},
-    }))
-    attempts.append(("no cookies, no extractor_args", {
-        "format": "bestvideo+bestaudio/best",
-    }))
-
-    # Strategy 4: Absolute last resort
-    attempts.append(("minimal opts - last resort", {
-        "format": "best",
-    }))
 
     base_opts = {
         "quiet": True,
         "no_warnings": True,
         "extract_flat": False,
         "noplaylist": True,
-        "format": "best",
     }
     if proxy:
         base_opts["proxy"] = proxy
@@ -316,9 +284,18 @@ async def extract_video_info(url: str) -> Optional[Dict[str, Any]]:
     for label, extra_opts in attempts:
         opts = base_opts.copy()
         opts.update(extra_opts)
-        result = _try_extract(url, opts, label)
-        if result is not None:
-            return result
+        # Ensure merge_output_format when using +
+        if "+" in opts.get("format", "") and config.download.ffmpeg_available:
+            opts["merge_output_format"] = "mp4"
+        try:
+            logger.info(f"[YouTube] Extract: {label}")
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                logger.info(f"[YouTube] SUCCESS: {label}")
+                return info
+        except Exception as e:
+            logger.warning(f"[YouTube] {label} failed: {str(e)[:120]}")
+            continue
 
     logger.error("[YouTube] All extraction attempts failed")
     return None
@@ -326,59 +303,64 @@ async def extract_video_info(url: str) -> Optional[Dict[str, Any]]:
 
 async def download_video(url: str, quality: str = "720",
                          audio_only: bool = False) -> Optional[Tuple[str, Dict[str, Any]]]:
-    """
-    Download video/audio and return (file_path, info_dict)
-
-    Returns:
-        Tuple of (file_path, info_dict) or None on failure
-    """
+    """Download video/audio and return (file_path, info_dict) or None"""
     platform = detect_platform(url)
     is_youtube = platform == "youtube"
     cookies_path = _find_cookies_file()
 
     if not is_youtube:
-        # Non-YouTube platforms: simple download
         return await _download_non_youtube(url, quality, audio_only)
 
     # YouTube: try multiple strategies
+    # Key insight: DON'T use extractor_args (broken in yt-dlp 2025.5.22)
+    # Just try different format strings with/without cookies
+    
     output_path = tempfile.mkdtemp()
+    format_selector = get_format_selector(quality, audio_only)
 
-    # Build list of strategies to try
     strategies = []
 
-    # Strategy 1: With cookies + extractor_args (newer yt-dlp)
+    # Strategy 1: Quality-specific format with cookies
     if cookies_path:
-        strategies.append(("cookies + web client", {
+        strategies.append(("cookies + quality format", {
             "cookiefile": cookies_path,
-            "extractor_args": {"youtube": {"player_client": ["web"]}},
-        }))
-        strategies.append(("cookies + ios client", {
-            "cookiefile": cookies_path,
-            "extractor_args": {"youtube": {"player_client": ["ios"]}},
+            "format": format_selector,
         }))
 
-    # Strategy 2: With cookies, no extractor_args (older yt-dlp)
+    # Strategy 2: bestvideo+bestaudio with cookies (no height limit)
     if cookies_path:
-        strategies.append(("cookies, no extractor_args", {}))
+        strategies.append(("cookies + bestvideo+bestaudio", {
+            "cookiefile": cookies_path,
+            "format": "bestvideo+bestaudio/best",
+        }))
 
-    # Strategy 3: Without cookies + extractor_args
-    strategies.append(("no cookies + ios client", {
-        "extractor_args": {"youtube": {"player_client": ["ios"]}},
-    }))
-    strategies.append(("no cookies + android client", {
-        "extractor_args": {"youtube": {"player_client": ["android"]}},
+    # Strategy 3: Without cookies, quality-specific
+    strategies.append(("no cookies + quality format", {
+        "format": format_selector,
     }))
 
-    # Strategy 4: Bare minimum
-    strategies.append(("minimal - no extras", {}))
+    # Strategy 4: Without cookies, bestvideo+bestaudio
+    strategies.append(("no cookies + bestvideo+bestaudio", {
+        "format": "bestvideo+bestaudio/best",
+    }))
+
+    # Strategy 5: Absolute fallback
+    strategies.append(("fallback: best", {
+        "format": "best",
+    }))
 
     for label, extra_opts in strategies:
         try:
-            logger.info(f"[YouTube] Download attempt: {label}, quality={quality}")
-            opts = get_ydl_opts(quality, audio_only, output_path,
-                                use_cookies=("cookies" in label),
-                                youtube_mode=True)
-            opts.update(extra_opts)
+            logger.info(f"[YouTube] Download: {label}, quality={quality}")
+            opts = _build_ydl_opts(
+                output_path=output_path,
+                quality=quality,
+                audio_only=audio_only,
+                use_cookies=("cookies" in label),
+                format_override=extra_opts.get("format"),
+            )
+            if "cookiefile" in extra_opts:
+                opts["cookiefile"] = extra_opts["cookiefile"]
 
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=True)
@@ -389,7 +371,6 @@ async def download_video(url: str, quality: str = "720",
 
                 file_path = ydl.prepare_filename(info)
 
-                # For audio with FFmpeg post-processing
                 if audio_only and config.download.ffmpeg_available:
                     base_path = os.path.splitext(file_path)[0]
                     mp3_path = base_path + ".mp3"
@@ -404,7 +385,7 @@ async def download_video(url: str, quality: str = "720",
                         output_path = tempfile.mkdtemp()
                         continue
 
-                logger.info(f"[YouTube] Download SUCCESS with {label}")
+                logger.info(f"[YouTube] Download SUCCESS: {label}")
                 return file_path, info
 
         except yt_dlp.utils.MaxDownloadsExceeded:
@@ -412,7 +393,7 @@ async def download_video(url: str, quality: str = "720",
             return None
         except Exception as e:
             error_msg = str(e)
-            logger.warning(f"[YouTube] Download attempt '{label}' failed: {error_msg[:150]}")
+            logger.warning(f"[YouTube] Download '{label}' failed: {error_msg[:120]}")
             output_path = tempfile.mkdtemp()
             continue
 
@@ -425,7 +406,7 @@ async def _download_non_youtube(url: str, quality: str, audio_only: bool) -> Opt
     output_path = tempfile.mkdtemp()
 
     try:
-        opts = get_ydl_opts(quality, audio_only, output_path, use_cookies=True)
+        opts = _build_ydl_opts(output_path=output_path, quality=quality, audio_only=audio_only, use_cookies=True)
 
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -456,11 +437,10 @@ async def _download_non_youtube(url: str, quality: str, audio_only: bool) -> Opt
         return None
     except Exception as e:
         logger.error(f"Download error: {e}")
-        # Simple fallback
         try:
             output_path2 = tempfile.mkdtemp()
-            opts2 = get_ydl_opts(quality, audio_only, output_path2, use_cookies=True)
-            opts2["format"] = "best"
+            opts2 = _build_ydl_opts(output_path=output_path2, quality=quality, audio_only=audio_only, use_cookies=True)
+            opts2["format"] = "bestvideo+bestaudio/best"
             with yt_dlp.YoutubeDL(opts2) as ydl:
                 info = ydl.extract_info(url, download=True)
                 if info is None:
@@ -480,22 +460,14 @@ async def _download_non_youtube(url: str, quality: str, audio_only: bool) -> Opt
 
 async def download_video_auto_quality(url: str, start_quality: str = "720",
                                        audio_only: bool = False) -> Optional[Tuple[str, Dict[str, Any]]]:
-    """
-    Download video with automatic quality reduction if file is too large.
-    Tries: start_quality -> lower quality -> even lower -> as document
-
-    Returns:
-        Tuple of (file_path, info_dict) or None on failure
-    """
+    """Download video with automatic quality reduction if file is too large."""
     quality_levels = ["1080", "720", "480", "360"]
 
-    # Find starting quality index
     try:
         start_idx = quality_levels.index(start_quality)
     except ValueError:
-        start_idx = 1  # Default to 720p
+        start_idx = 1
 
-    # Try each quality level from start to lowest
     for quality in quality_levels[start_idx:]:
         result = await download_video(url, quality, audio_only)
         if result is None:
@@ -507,9 +479,7 @@ async def download_video_auto_quality(url: str, start_quality: str = "720",
         if file_size_mb <= config.download.max_file_size_mb:
             return result
 
-        # File too large, try lower quality
         logger.info(f"File too large ({file_size_mb:.1f}MB) at {quality}p, trying lower quality")
-        # Clean up
         try:
             os.remove(file_path)
         except OSError:
@@ -523,7 +493,6 @@ def cleanup_file(file_path: str) -> None:
     try:
         if os.path.exists(file_path):
             os.remove(file_path)
-        # Try to remove the temp directory
         dir_path = os.path.dirname(file_path)
         if os.path.exists(dir_path) and not os.listdir(dir_path):
             os.rmdir(dir_path)
