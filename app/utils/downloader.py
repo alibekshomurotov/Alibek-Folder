@@ -1,3 +1,5 @@
+"""Video/Audio Downloader using yt-dlp"""
+
 import os
 import logging
 import shutil
@@ -64,7 +66,7 @@ def _find_cookies_file() -> Optional[str]:
 
 
 def log_cookies_status() -> None:
-    """Log the current cookies status — call this at startup"""
+    """Log the current cookies status - call this at startup"""
     path = _find_cookies_file()
     if path:
         try:
@@ -124,14 +126,6 @@ def _get_youtube_headers() -> Dict[str, str]:
     }
 
 
-def _add_youtube_opts(opts: Dict[str, Any]) -> Dict[str, Any]:
-    """Add YouTube-specific options to bypass bot detection"""
-    opts["http_headers"] = _get_youtube_headers()
-    # Try tv_embedded client — often bypasses bot detection without cookies
-    opts["extractor_args"] = {"youtube": {"player_client": ["tv_embedded", "ios"]}}
-    return opts
-
-
 def get_format_selector(quality: str = "720", audio_only: bool = False) -> str:
     """Get yt-dlp format selector based on quality and FFmpeg availability"""
     if audio_only:
@@ -144,7 +138,7 @@ def get_format_selector(quality: str = "720", audio_only: bool = False) -> str:
 
     if config.download.ffmpeg_available:
         # With FFmpeg: merge best video + audio, FFmpeg converts to mp4
-        # NOTE: Do NOT use [ext=mp4] on bestvideo — YouTube often serves
+        # NOTE: Do NOT use [ext=mp4] on bestvideo - YouTube often serves
         # video-only streams as webm; FFmpeg will merge & convert to mp4.
         return (
             f"bestvideo[height<={height}]+bestaudio/"
@@ -214,12 +208,14 @@ def get_ydl_opts(quality: str = "720", audio_only: bool = False,
 
 # Player client configurations to try for YouTube (ordered by success rate)
 _YT_PLAYER_CLIENTS = [
-    ["tv_embedded", "ios"],       # Most reliable for bypassing bot detection
-    ["ios"],                       # iOS client — no PO token needed
+    ["web"],                      # Web client - most compatible
+    ["ios"],                       # iOS client - no PO token needed
     ["android"],                   # Android client
     ["web", "ios"],                # Web + iOS fallback
+    ["tv_embedded", "ios"],       # TV embedded - sometimes bypasses bot detection
     ["mweb"],                      # Mobile web
     ["tv"],                        # Smart TV client
+    ["android_vr"],               # Android VR client
 ]
 
 
@@ -271,13 +267,19 @@ async def extract_video_info(url: str) -> Optional[Dict[str, Any]]:
         except Exception as e:
             error_msg = str(e)
             logger.warning(f"[YouTube] Attempt {i+1} failed with player_client={player_clients}: {error_msg[:100]}")
-            # If it's not a bot detection error, no point retrying with different clients
-            if "Sign in" not in error_msg and "bot" not in error_msg.lower():
-                logger.error(f"[YouTube] Non-bot error, stopping retries: {e}")
+            # Retry with different player_client for these errors:
+            # - "Sign in" (bot detection)
+            # - "Failed to extract any player response" (player client incompatibility)
+            # - "Requested format is not available" (format issue)
+            # Don't retry for permanent errors like video not found, private video, etc.
+            retryable_errors = ["Sign in", "bot", "Failed to extract", "Requested format"]
+            is_retryable = any(err in error_msg for err in retryable_errors)
+            if not is_retryable:
+                logger.error(f"[YouTube] Permanent error, stopping retries: {e}")
                 return None
             continue
 
-    logger.error(f"[YouTube] All {len(_YT_PLAYER_CLIENTS)} player_client attempts failed for bot detection")
+    logger.error(f"[YouTube] All {len(_YT_PLAYER_CLIENTS)} player_client attempts failed")
     return None
 
 
@@ -293,12 +295,65 @@ async def download_video(url: str, quality: str = "720",
     platform = detect_platform(url)
     is_youtube = platform == "youtube"
 
+    # YouTube: try multiple player_client configurations
+    if is_youtube:
+        for i, player_clients in enumerate(_YT_PLAYER_CLIENTS):
+            try:
+                logger.info(f"[YouTube] Download attempt {i+1}/{len(_YT_PLAYER_CLIENTS)} with player_client={player_clients}, quality={quality}")
+                opts = get_ydl_opts(quality, audio_only, output_path)
+                opts["http_headers"] = _get_youtube_headers()
+                opts["extractor_args"] = {"youtube": {"player_client": player_clients}}
+
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+
+                    if info is None:
+                        continue
+
+                    # Find the downloaded file
+                    file_path = ydl.prepare_filename(info)
+
+                    # For audio with FFmpeg post-processing, the extension changes
+                    if audio_only and config.download.ffmpeg_available:
+                        base_path = os.path.splitext(file_path)[0]
+                        mp3_path = base_path + ".mp3"
+                        if os.path.exists(mp3_path):
+                            file_path = mp3_path
+
+                    if not os.path.exists(file_path):
+                        # Try to find any file in the output directory
+                        files = os.listdir(output_path)
+                        if files:
+                            file_path = os.path.join(output_path, files[0])
+                        else:
+                            logger.error("Downloaded file not found")
+                            continue
+
+                    logger.info(f"[YouTube] Download SUCCESS with player_client={player_clients}")
+                    return file_path, info
+
+            except yt_dlp.utils.MaxDownloadsExceeded:
+                logger.warning("File size exceeded maximum")
+                return None
+            except Exception as e:
+                error_msg = str(e)
+                logger.warning(f"[YouTube] Download attempt {i+1} failed: {error_msg[:100]}")
+                # Only retry for bot detection or player response errors
+                retryable_errors = ["Sign in", "bot", "Failed to extract", "Requested format"]
+                is_retryable = any(err in error_msg for err in retryable_errors)
+                if not is_retryable:
+                    logger.error(f"[YouTube] Permanent download error: {e}")
+                    return None
+                # Create new output dir for next attempt
+                output_path = tempfile.mkdtemp()
+                continue
+
+        logger.error(f"[YouTube] All {len(_YT_PLAYER_CLIENTS)} download attempts failed")
+        return None
+
+    # Non-YouTube platforms: simple download
     try:
         opts = get_ydl_opts(quality, audio_only, output_path)
-
-        # Add YouTube-specific options
-        if is_youtube:
-            opts = _add_youtube_opts(opts)
 
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -331,59 +386,27 @@ async def download_video(url: str, quality: str = "720",
         logger.warning("File size exceeded maximum")
         return None
     except yt_dlp.utils.DownloadError as e:
-        error_msg = str(e)
-        logger.error(f"Download error: {error_msg[:200]}")
-
-        if is_youtube and ("Sign in" in error_msg or "bot" in error_msg.lower()):
-            # Try different player_client configurations for YouTube bot detection
-            for i, player_clients in enumerate(_YT_PLAYER_CLIENTS[1:], 2):
-                try:
-                    logger.info(f"[YouTube] Download retry {i}/{len(_YT_PLAYER_CLIENTS)} with player_client={player_clients}")
-                    output_path_retry = tempfile.mkdtemp()
-                    opts_retry = get_ydl_opts(quality, audio_only, output_path_retry)
-                    opts_retry["format"] = "best"
-                    opts_retry["http_headers"] = _get_youtube_headers()
-                    opts_retry["extractor_args"] = {"youtube": {"player_client": player_clients}}
-
-                    with yt_dlp.YoutubeDL(opts_retry) as ydl:
-                        info = ydl.extract_info(url, download=True)
-                        if info is None:
-                            continue
-                        file_path = ydl.prepare_filename(info)
-                        if not os.path.exists(file_path):
-                            files = os.listdir(output_path_retry)
-                            if files:
-                                file_path = os.path.join(output_path_retry, files[0])
-                            else:
-                                continue
-                        logger.info(f"[YouTube] Download SUCCESS with player_client={player_clients}")
-                        return file_path, info
-                except Exception as retry_err:
-                    logger.warning(f"[YouTube] Download retry {i} failed: {str(retry_err)[:100]}")
-                    continue
-            logger.error(f"[YouTube] All download attempts failed for bot detection")
-            return None
-        else:
-            # Non-YouTube or non-bot error: simple fallback
-            try:
-                output_path2 = tempfile.mkdtemp()
-                opts2 = get_ydl_opts(quality, audio_only, output_path2)
-                opts2["format"] = "best"
-                with yt_dlp.YoutubeDL(opts2) as ydl:
-                    info = ydl.extract_info(url, download=True)
-                    if info is None:
+        logger.error(f"Download error: {e}")
+        # Simple fallback
+        try:
+            output_path2 = tempfile.mkdtemp()
+            opts2 = get_ydl_opts(quality, audio_only, output_path2)
+            opts2["format"] = "best"
+            with yt_dlp.YoutubeDL(opts2) as ydl:
+                info = ydl.extract_info(url, download=True)
+                if info is None:
+                    return None
+                file_path = ydl.prepare_filename(info)
+                if not os.path.exists(file_path):
+                    files = os.listdir(output_path2)
+                    if files:
+                        file_path = os.path.join(output_path2, files[0])
+                    else:
                         return None
-                    file_path = ydl.prepare_filename(info)
-                    if not os.path.exists(file_path):
-                        files = os.listdir(output_path2)
-                        if files:
-                            file_path = os.path.join(output_path2, files[0])
-                        else:
-                            return None
-                    return file_path, info
-            except Exception as fallback_err:
-                logger.error(f"Fallback download also failed: {fallback_err}")
-                return None
+                return file_path, info
+        except Exception as fallback_err:
+            logger.error(f"Fallback download also failed: {fallback_err}")
+            return None
     except Exception as e:
         logger.error(f"Unexpected download error: {e}")
         return None
