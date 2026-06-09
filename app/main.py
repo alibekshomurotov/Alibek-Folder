@@ -88,6 +88,20 @@ async def main():
     await init_db()
     logger.info("Database initialized.")
 
+    # Upgrade yt-dlp at runtime and log version
+    import subprocess
+    try:
+        logger.info("Upgrading yt-dlp to latest version...")
+        subprocess.run([sys.executable, "-m", "pip", "install", "--upgrade", "yt-dlp"],
+                       capture_output=True, timeout=120)
+        # Re-import to get new version
+        import importlib
+        import yt_dlp as _ydl
+        importlib.reload(_ydl)
+        logger.info(f"yt-dlp upgraded to: {_ydl.version.__version__}")
+    except Exception as e:
+        logger.warning(f"Could not upgrade yt-dlp: {e}")
+
     # Log cookies status at startup
     from app.utils.downloader import log_cookies_status
     log_cookies_status()
