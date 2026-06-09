@@ -1,4 +1,4 @@
-#!/bin/bash
+!/bin/bash
 set -e
 
 echo "=== Building Video Downloader Bot ==="
@@ -16,12 +16,20 @@ echo "FFmpeg installed successfully!"
 echo "Installing Python dependencies..."
 pip install -r requirements.txt
 
-# Force upgrade yt-dlp to the absolute latest version
-# This is critical because YouTube frequently breaks and yt-dlp fixes it fast
+# Force upgrade yt-dlp to the ABSOLUTE latest version
+# This is CRITICAL because YouTube frequently changes and old yt-dlp versions
+# can only see storyboard formats (sb0-sb3) instead of video/audio formats.
 echo "Upgrading yt-dlp to latest version..."
-pip install --upgrade yt-dlp
+pip install --upgrade --no-cache-dir yt-dlp
 
-# Show yt-dlp version
-echo "yt-dlp version: $(yt-dlp --version)"
+# Verify yt-dlp version
+YTDLP_VERSION=$(yt-dlp --version 2>/dev/null || echo "unknown")
+echo "yt-dlp version: ${YTDLP_VERSION}"
+
+# Warn if version looks old
+if [[ "${YTDLP_VERSION}" == 2025.* ]]; then
+    echo "WARNING: yt-dlp version ${YTDLP_VERSION} may be too old for current YouTube!"
+    echo "The start.sh script will also upgrade yt-dlp at runtime."
+fi
 
 echo "=== Build complete ==="

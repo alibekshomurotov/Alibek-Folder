@@ -43,6 +43,7 @@ async def start_health_server():
                 found_critical = [c for c in critical if c in cookie_text]
                 missing_critical = [c for c in critical if c not in cookie_text]
 
+                import yt_dlp as _ydl
                 return web.json_response({
                     "status": "cookies_found",
                     "path": path,
@@ -51,6 +52,7 @@ async def start_health_server():
                     "instagram_cookies": len(ig_cookies),
                     "found_critical": found_critical,
                     "missing_critical": missing_critical,
+                    "yt_dlp_version": _ydl.version.__version__,
                 })
             except Exception as e:
                 return web.json_response({"status": "error", "error": str(e)})
@@ -88,19 +90,21 @@ async def main():
     await init_db()
     logger.info("Database initialized.")
 
-    # Upgrade yt-dlp at runtime and log version
-    import subprocess
+    # Log yt-dlp version (it was upgraded in start.sh BEFORE Python started)
+    import yt_dlp as _ydl
+    yt_version = _ydl.version.__version__
+    logger.info(f"[yt-dlp] Running version: {yt_version}")
+
+    # Warn if version looks too old (YouTube breaks frequently)
     try:
-        logger.info("Upgrading yt-dlp to latest version...")
-        subprocess.run([sys.executable, "-m", "pip", "install", "--upgrade", "yt-dlp"],
-                       capture_output=True, timeout=120)
-        # Re-import to get new version
-        import importlib
-        import yt_dlp as _ydl
-        importlib.reload(_ydl)
-        logger.info(f"yt-dlp upgraded to: {_ydl.version.__version__}")
-    except Exception as e:
-        logger.warning(f"Could not upgrade yt-dlp: {e}")
+        year, month = yt_version.split(".")[:2]
+        if int(year) < 2026 or (int(year) == 2025 and int(month) < 12):
+            logger.warning(
+                f"[yt-dlp] Version {yt_version} may be TOO OLD for current YouTube! "
+                f"Make sure start.sh runs 'pip install --upgrade yt-dlp' before starting the bot."
+            )
+    except (ValueError, IndexError):
+        pass
 
     # Log cookies status at startup
     from app.utils.downloader import log_cookies_status
