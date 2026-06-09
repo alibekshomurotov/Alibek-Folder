@@ -1,5 +1,3 @@
-
-
 import os
 import logging
 import shutil
@@ -114,12 +112,7 @@ def is_video_url(url: str) -> bool:
 
 
 def get_format_selector(quality: str = "720", audio_only: bool = False) -> str:
-    """Get format selector string for yt-dlp.
-
-    For YouTube with FFmpeg: use bestvideo+bestaudio (adaptive streams that need merging)
-    For YouTube without FFmpeg: use best (pre-merged formats only)
-    For audio only: bestaudio
-    """
+    """Get format selector string for yt-dlp download."""
     if audio_only:
         if config.download.ffmpeg_available:
             return "bestaudio/best"
@@ -129,8 +122,6 @@ def get_format_selector(quality: str = "720", audio_only: bool = False) -> str:
     height = quality.replace("p", "")
 
     if config.download.ffmpeg_available:
-        # With FFmpeg, we can merge separate video+audio streams
-        # This is needed for YouTube which mostly serves adaptive streams
         return (
             f"bestvideo[height<={height}]+bestaudio/"
             f"bestvideo+bestaudio/"
@@ -138,7 +129,6 @@ def get_format_selector(quality: str = "720", audio_only: bool = False) -> str:
             f"best"
         )
     else:
-        # Without FFmpeg, we need pre-merged formats
         return (
             f"best[height<={height}][ext=mp4]/"
             f"best[height<={height}]/"
@@ -196,74 +186,165 @@ def _build_download_opts(output_path: str, quality: str = "720",
     return opts
 
 
-async def extract_video_info(url: str) -> Optional[Dict[str, Any]]:
+def _log_formats(info: Dict[str, Any], label: str = "") -> None:
+    """Log available format details for debugging."""
+    formats = info.get("formats", [])
+    video_formats = [f for f in formats if f.get("vcodec") != "none" and f.get("acodec") != "none"]
+    video_only = [f for f in formats if f.get("vcodec") != "none" and f.get("acodec") == "none"]
+    audio_only_fmts = [f for f in formats if f.get("vcodec") == "none" and f.get("acodec") != "none"]
+    storyboard = [f for f in formats if f.get("vcodec") == "none" and f.get("acodec") == "none"]
 
+    logger.info(
+        f"[FORMATS] {label} Total: {len(formats)}, "
+        f"Video: {len(video_formats)}, VideoOnly: {len(video_only)}, "
+        f"AudioOnly: {len(audio_only_fmts)}, Storyboard: {len(storyboard)}"
+    )
+
+    # Log first few video formats for debugging
+    for f in video_only[:3]:
+        logger.info(f"[FORMATS]   Video: {f.get('format_id')} {f.get('height')}p {f.get('vcodec')}")
+
+    for f in audio_only_fmts[:3]:
+        logger.info(f"[FORMATS]   Audio: {f.get('format_id')} {f.get('acodec')} {f.get('abr')}kbps")
+
+
+# YouTube player_client options to try
+# These tell yt-dlp to impersonate different YouTube clients,
+# which may return different format lists
+_YT_PLAYER_CLIENTS = [
+    None,           # Default (no extractor_args)
+    "web",          # Regular web browser
+    "android",      # Android app (often has direct URLs)
+    "ios",          # iOS app
+    "mweb",         # Mobile web
+]
+
+
+async def extract_video_info(url: str) -> Optional[Dict[str, Any]]:
+    """Extract video information without downloading.
+
+    CRITICAL: For YouTube, we use format="all" during extraction.
+    yt-dlp applies its default format selector even during extract_info(download=False).
+    If only storyboard formats are available, the default selector fails.
+    Using "all" returns ALL formats without filtering.
+    """
     platform = detect_platform(url)
     is_youtube = platform == "youtube"
     cookies_path = _find_cookies_file()
 
-    # Base opts - NO format for YouTube, permissive format for others
-    base_opts = _build_base_opts(use_cookies=True)
-    base_opts["extract_flat"] = False
-
     if is_youtube:
-        # YouTube: Try with cookies first (needed for bot detection),
-        # then without cookies as fallback
+        return await _extract_youtube_info(url, cookies_path)
+
+    # Non-YouTube platforms
+    return await _extract_non_youtube_info(url, platform)
+
+
+async def _extract_youtube_info(url: str, cookies_path: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Extract YouTube video info with multiple strategies.
+
+    Strategy:
+    1. With cookies + format="all" (bypass format filtering entirely)
+    2. With cookies + format="all" + player_client=android (Android client often has direct URLs)
+    3. With cookies + format="all" + player_client=ios
+    4. With cookies + format="all" + player_client=web
+    5. Without cookies (will likely hit bot detection)
+    """
+    for player_client in _YT_PLAYER_CLIENTS:
         for use_cookies in [True, False]:
             if use_cookies and not cookies_path:
                 continue
 
-            attempt_opts = base_opts.copy()
-            if use_cookies:
-                attempt_opts["cookiefile"] = cookies_path
-                label = "with cookies"
-            else:
-                attempt_opts.pop("cookiefile", None)
-                label = "without cookies"
+            # Build label for logging
+            parts = []
+            parts.append("cookies" if use_cookies else "no-cookies")
+            if player_client:
+                parts.append(f"client={player_client}")
+            label = " + ".join(parts)
 
             try:
-                logger.info(f"[YouTube] Extract info {label} (no format filter)")
-                with yt_dlp.YoutubeDL(attempt_opts) as ydl:
+                opts = {
+                    "format": "all",  # CRITICAL: get ALL formats, no filtering!
+                    "quiet": True,
+                    "no_warnings": True,
+                    "extract_flat": False,
+                    "noplaylist": True,
+                }
+
+                if use_cookies:
+                    opts["cookiefile"] = cookies_path
+
+                if player_client:
+                    opts["extractor_args"] = {"youtube": {"player_client": [player_client]}}
+
+                proxy = os.getenv("HTTP_PROXY") or os.getenv("HTTPS_PROXY")
+                if proxy:
+                    opts["proxy"] = proxy
+
+                logger.info(f"[YouTube] Extract: {label}")
+                with yt_dlp.YoutubeDL(opts) as ydl:
                     info = ydl.extract_info(url, download=False)
                     if info:
+                        _log_formats(info, f"[{label}]")
+                        # Check if we actually got video/audio formats
                         formats = info.get("formats", [])
-                        video_formats = [f for f in formats
-                                        if f.get("vcodec") != "none" and f.get("acodec") != "none"]
-                        video_only = [f for f in formats
-                                     if f.get("vcodec") != "none" and f.get("acodec") == "none"]
-                        audio_only = [f for f in formats
-                                     if f.get("vcodec") == "none" and f.get("acodec") != "none"]
-                        logger.info(
-                            f"[YouTube] Extract SUCCESS {label} - "
-                            f"Total: {len(formats)}, Video: {len(video_formats)}, "
-                            f"VideoOnly: {len(video_only)}, AudioOnly: {len(audio_only)}"
-                        )
-                        return info
+                        has_video = any(f.get("vcodec") != "none" for f in formats)
+                        has_audio = any(f.get("acodec") != "none" for f in formats)
+
+                        if has_video or has_audio:
+                            logger.info(f"[YouTube] Extract SUCCESS: {label}")
+                            return info
+                        else:
+                            logger.warning(f"[YouTube] Extract {label}: only storyboard formats, skipping")
+                            continue
+
             except Exception as e:
                 error_msg = str(e)
                 logger.warning(f"[YouTube] Extract {label} failed: {error_msg[:200]}")
                 continue
 
-        logger.error("[YouTube] All extraction attempts failed")
-        return None
+    logger.error("[YouTube] All extraction attempts failed")
+    return None
 
-    else:
-        # Non-YouTube platforms: add format for compatibility
-        base_opts["format"] = "bestvideo+bestaudio/best"
+
+async def _extract_non_youtube_info(url: str, platform: str) -> Optional[Dict[str, Any]]:
+    """Extract info from non-YouTube platforms."""
+    cookies_path = _find_cookies_file()
+
+    # Try with cookies + permissive format
+    for use_cookies in [True, False]:
+        if use_cookies and not cookies_path:
+            continue
+
         try:
-            with yt_dlp.YoutubeDL(base_opts) as ydl:
-                return ydl.extract_info(url, download=False)
+            opts = {
+                "format": "all",  # Get all formats without filtering
+                "quiet": True,
+                "no_warnings": True,
+                "extract_flat": False,
+                "noplaylist": True,
+            }
+
+            if use_cookies:
+                opts["cookiefile"] = cookies_path
+
+            proxy = os.getenv("HTTP_PROXY") or os.getenv("HTTPS_PROXY")
+            if proxy:
+                opts["proxy"] = proxy
+
+            label = "cookies" if use_cookies else "no-cookies"
+            logger.info(f"[{platform}] Extract: {label}")
+
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                if info:
+                    return info
+
         except Exception as e:
-            logger.error(f"Error extracting info from {platform}: {e}")
-            # Try without format as fallback
-            try:
-                fallback_opts = _build_base_opts(use_cookies=True)
-                fallback_opts["extract_flat"] = False
-                with yt_dlp.YoutubeDL(fallback_opts) as ydl:
-                    return ydl.extract_info(url, download=False)
-            except Exception as e2:
-                logger.error(f"Fallback extract also failed for {platform}: {e2}")
-                return None
+            logger.warning(f"[{platform}] Extract ({'cookies' if use_cookies else 'no-cookies'}) failed: {str(e)[:150]}")
+            continue
+
+    logger.error(f"[{platform}] All extraction attempts failed")
+    return None
 
 
 async def download_video(url: str, quality: str = "720",
@@ -283,49 +364,49 @@ async def _download_youtube(url: str, quality: str = "720",
     """Download from YouTube with multiple fallback strategies.
 
     Strategy:
-    1. With cookies + quality-specific format (best approach for new yt-dlp)
-    2. With cookies + no format (let yt-dlp auto-select)
-    3. With cookies + simple "best" format
-    4. Without cookies + quality format (may hit bot detection)
+    1. With cookies + quality format + default player
+    2. With cookies + player_client=android (Android often has direct media URLs)
+    3. With cookies + player_client=web
+    4. With cookies + format="all" (get anything available)
+    5. With cookies + format="best" (simplest selector)
+    6. Without cookies (will likely fail with bot detection)
     """
     cookies_path = _find_cookies_file()
     output_path = tempfile.mkdtemp()
-
     fmt_quality = get_format_selector(quality, audio_only)
 
+    # Build attempt list: (label, use_cookies, format, player_client)
     attempts = []
 
-    # With cookies - multiple format strategies
     if cookies_path:
-        # Attempt 1: Quality-specific format (best for new yt-dlp with proper format parsing)
-        attempts.append(("cookies + quality format", True, fmt_quality))
-        # Attempt 2: No format filter - let yt-dlp choose
-        attempts.append(("cookies + auto select", True, None))
-        # Attempt 3: Simple "best" as last resort with cookies
-        attempts.append(("cookies + best", True, "best"))
+        # Attempt 1: Quality format with default client
+        attempts.append(("cookies + quality", True, fmt_quality, None))
+        # Attempt 2: Android client - often bypasses restrictions
+        attempts.append(("cookies + android", True, fmt_quality, "android"))
+        # Attempt 3: iOS client
+        attempts.append(("cookies + ios", True, fmt_quality, "ios"))
+        # Attempt 4: Web client explicitly
+        attempts.append(("cookies + web", True, fmt_quality, "web"))
+        # Attempt 5: Mobile web client
+        attempts.append(("cookies + mweb", True, fmt_quality, "mweb"))
+        # Attempt 6: format="all" to get anything
+        attempts.append(("cookies + all formats", True, "all/mergeall", None))
+        # Attempt 7: Simple "best"
+        attempts.append(("cookies + best", True, "best", None))
 
     # Without cookies - may hit bot detection
-    attempts.append(("no cookies + quality format", False, fmt_quality))
-    attempts.append(("no cookies + best", False, "best"))
+    attempts.append(("no-cookies + quality", False, fmt_quality, None))
+    attempts.append(("no-cookies + android", False, fmt_quality, "android"))
+    attempts.append(("no-cookies + best", False, "best", None))
 
-    for label, use_cookies, fmt_override in attempts:
+    for label, use_cookies, fmt, player_client in attempts:
         try:
-            logger.info(f"[YouTube] Download attempt: {label}")
+            logger.info(f"[YouTube] Download: {label}")
 
-            if fmt_override is None:
-                # No format specified - let yt-dlp auto-select
-                opts = _build_base_opts(use_cookies)
-                opts["outtmpl"] = os.path.join(output_path, "%(id)s.%(ext)s")
-                opts["extract_flat"] = False
-                opts["max_filesize"] = config.download.max_file_size_mb * 1024 * 1024
-                if audio_only and config.download.ffmpeg_available:
-                    opts["postprocessors"] = [{
-                        "key": "FFmpegExtractAudio",
-                        "preferredcodec": "mp3",
-                        "preferredquality": "192",
-                    }]
-            else:
-                opts = _build_download_opts(output_path, quality, audio_only, use_cookies, fmt_override)
+            opts = _build_download_opts(output_path, quality, audio_only, use_cookies, fmt)
+
+            if player_client:
+                opts["extractor_args"] = {"youtube": {"player_client": [player_client]}}
 
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=True)
@@ -398,10 +479,10 @@ async def _download_non_youtube(url: str, quality: str, audio_only: bool) -> Opt
     except Exception as e:
         logger.error(f"Download error (with cookies): {e}")
 
-    # Fallback 1: without cookies, quality format
+    # Fallback 1: with cookies, format="all"
     try:
         output_path2 = tempfile.mkdtemp()
-        opts2 = _build_download_opts(output_path2, quality, audio_only, use_cookies=False)
+        opts2 = _build_download_opts(output_path2, quality, audio_only, use_cookies=True, format_override="all/mergeall")
         with yt_dlp.YoutubeDL(opts2) as ydl:
             info = ydl.extract_info(url, download=True)
             if info is None:
@@ -415,12 +496,12 @@ async def _download_non_youtube(url: str, quality: str, audio_only: bool) -> Opt
                     return None
             return file_path, info
     except Exception as e:
-        logger.warning(f"Download error (no cookies): {e}")
+        logger.warning(f"Download error (cookies + all): {e}")
 
-    # Fallback 2: with cookies, simple "best"
+    # Fallback 2: without cookies, quality format
     try:
         output_path3 = tempfile.mkdtemp()
-        opts3 = _build_download_opts(output_path3, quality, audio_only, use_cookies=True, format_override="best")
+        opts3 = _build_download_opts(output_path3, quality, audio_only, use_cookies=False)
         with yt_dlp.YoutubeDL(opts3) as ydl:
             info = ydl.extract_info(url, download=True)
             if info is None:
@@ -430,6 +511,25 @@ async def _download_non_youtube(url: str, quality: str, audio_only: bool) -> Opt
                 files = os.listdir(output_path3)
                 if files:
                     file_path = os.path.join(output_path3, files[0])
+                else:
+                    return None
+            return file_path, info
+    except Exception as e:
+        logger.warning(f"Download error (no cookies): {e}")
+
+    # Fallback 3: with cookies, simple "best"
+    try:
+        output_path4 = tempfile.mkdtemp()
+        opts4 = _build_download_opts(output_path4, quality, audio_only, use_cookies=True, format_override="best")
+        with yt_dlp.YoutubeDL(opts4) as ydl:
+            info = ydl.extract_info(url, download=True)
+            if info is None:
+                return None
+            file_path = ydl.prepare_filename(info)
+            if not os.path.exists(file_path):
+                files = os.listdir(output_path4)
+                if files:
+                    file_path = os.path.join(output_path4, files[0])
                 else:
                     return None
             return file_path, info
