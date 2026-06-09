@@ -24,16 +24,49 @@ logger = logging.getLogger(__name__)
 
 
 async def start_health_server():
-    """Start a simple HTTP health check server for Render Web Service"""
+    """Start a simple HTTP health check server (required by Render Web Service)"""
     from aiohttp import web
 
     async def health_handler(request):
         return web.Response(text="OK - Video Downloader Pro bot is running", status=200)
 
+    async def debug_cookies_handler(request):
+        """Debug endpoint to check cookies status"""
+        from app.utils.downloader import _find_cookies_file, log_cookies_status
+        path = _find_cookies_file()
+        if path:
+            try:
+                with open(path, "r") as f:
+                    lines = f.readlines()
+                yt_cookies = [l for l in lines if "youtube.com" in l.lower() and not l.startswith("#")]
+                ig_cookies = [l for l in lines if "instagram.com" in l.lower() and not l.startswith("#")]
+                critical = ["__Secure-1PSID", "__Secure-3PSID", "SID", "HSID", "SSID", "SAPISID"]
+                cookie_text = "".join(lines)
+                found_critical = [c for c in critical if c in cookie_text]
+                missing_critical = [c for c in critical if c not in cookie_text]
+
+                return web.json_response({
+                    "status": "cookies_found",
+                    "path": path,
+                    "total_lines": len(lines),
+                    "youtube_cookies": len(yt_cookies),
+                    "instagram_cookies": len(ig_cookies),
+                    "found_critical": found_critical,
+                    "missing_critical": missing_critical,
+                })
+            except Exception as e:
+                return web.json_response({"status": "error", "error": str(e)})
+        else:
+            return web.json_response({
+                "status": "no_cookies",
+                "message": "No cookies.txt found! YouTube will not work.",
+                "hint": "Add YOUTUBE_COOKIES env var or Secret File at /etc/secrets/cookies.txt",
+            })
+
     app = web.Application()
     app.router.add_get("/", health_handler)
     app.router.add_get("/health", health_handler)
-
+    app.router.add_get("/debug/cookies", debug_cookies_handler)
     port = int(os.getenv("PORT", 10000))
     runner = web.AppRunner(app)
     await runner.setup()
@@ -49,13 +82,17 @@ async def main():
         logger.error("BOT_TOKEN is not set! Please set it in .env file or environment variables.")
         sys.exit(1)
 
+    # Start health check server for Render Web Service
+    await start_health_server()
+
     # Initialize database
     logger.info("Initializing database...")
     await init_db()
     logger.info("Database initialized.")
 
-    # Start health check server (required for Render Web Service)
-    await start_health_server()
+    # Log cookies status at startup
+    from app.utils.downloader import log_cookies_status
+    log_cookies_status()
 
     # Create bot and dispatcher
     bot = Bot(
@@ -67,16 +104,17 @@ async def main():
 
     dp = Dispatcher()
 
-    # Register middleware (minimal - no subscription or rate limits)
-    from app.middleware.auth import AuthMiddleware
+    # Register middleware
+    from app.middleware.auth import AuthMiddleware, SubscriptionMiddleware
     from app.middleware.throttle import ThrottleMiddleware
     from app.middleware.logging import LoggingMiddleware
 
-    # Only auth (ban check) and logging - no subscription or throttle limits
-    dp.message.middleware(AuthMiddleware())
-    dp.callback_query.middleware(AuthMiddleware())
     dp.message.middleware(ThrottleMiddleware())
     dp.callback_query.middleware(ThrottleMiddleware())
+    dp.message.middleware(AuthMiddleware())
+    dp.callback_query.middleware(AuthMiddleware())
+    dp.message.middleware(SubscriptionMiddleware())
+    dp.callback_query.middleware(SubscriptionMiddleware())
     dp.message.middleware(LoggingMiddleware())
     dp.callback_query.middleware(LoggingMiddleware())
 
