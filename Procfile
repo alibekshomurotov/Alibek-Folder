@@ -1,1 +1,1 @@
-worker: python -m app.main
+web: bash start.sh

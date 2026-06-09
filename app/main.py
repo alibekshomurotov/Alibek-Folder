@@ -29,9 +29,16 @@ async def start_health_server():
         return web.Response(text="OK - Video Downloader Pro bot is running", status=200)
 
     async def debug_cookies_handler(request):
-        """Debug endpoint to check cookies status"""
-        from app.utils.downloader import _find_cookies_file, log_cookies_status
+        """Debug endpoint to check cookies and yt-dlp status"""
+        from app.utils.downloader import _find_cookies_file
+        import yt_dlp as _ydl
+
         path = _find_cookies_file()
+        result = {
+            "yt_dlp_version": _ydl.version.__version__,
+            "cookies_path": path,
+        }
+
         if path:
             try:
                 with open(path, "r") as f:
@@ -43,25 +50,23 @@ async def start_health_server():
                 found_critical = [c for c in critical if c in cookie_text]
                 missing_critical = [c for c in critical if c not in cookie_text]
 
-                import yt_dlp as _ydl
-                return web.json_response({
+                result.update({
                     "status": "cookies_found",
-                    "path": path,
                     "total_lines": len(lines),
                     "youtube_cookies": len(yt_cookies),
                     "instagram_cookies": len(ig_cookies),
                     "found_critical": found_critical,
                     "missing_critical": missing_critical,
-                    "yt_dlp_version": _ydl.version.__version__,
                 })
             except Exception as e:
-                return web.json_response({"status": "error", "error": str(e)})
+                result.update({"status": "error", "error": str(e)})
         else:
-            return web.json_response({
+            result.update({
                 "status": "no_cookies",
-                "message": "No cookies.txt found! YouTube will not work.",
-                "hint": "Add YOUTUBE_COOKIES env var or Secret File at /etc/secrets/cookies.txt",
+                "message": "No cookies.txt found!",
             })
+
+        return web.json_response(result)
 
     app = web.Application()
     app.router.add_get("/", health_handler)
@@ -90,18 +95,18 @@ async def main():
     await init_db()
     logger.info("Database initialized.")
 
-    # Log yt-dlp version (it was upgraded in start.sh BEFORE Python started)
+    # Log yt-dlp version
     import yt_dlp as _ydl
     yt_version = _ydl.version.__version__
     logger.info(f"[yt-dlp] Running version: {yt_version}")
 
-    # Warn if version looks too old (YouTube breaks frequently)
+    # Warn if version looks too old
     try:
         year, month = yt_version.split(".")[:2]
         if int(year) < 2026 or (int(year) == 2025 and int(month) < 12):
             logger.warning(
-                f"[yt-dlp] Version {yt_version} may be TOO OLD for current YouTube! "
-                f"Make sure start.sh runs 'pip install --upgrade yt-dlp' before starting the bot."
+                f"[yt-dlp] Version {yt_version} is TOO OLD for current YouTube! "
+                f"YouTube will NOT work. Ensure __main__.py or start.sh upgrades yt-dlp."
             )
     except (ValueError, IndexError):
         pass

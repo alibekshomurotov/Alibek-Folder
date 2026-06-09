@@ -1,11 +1,11 @@
 services:
-  - type: worker
+  - type: web
     name: video-downloader-bot
     env: python
-    region: oregon
-    plan: free
+    runtime: python-3.12.9
     buildCommand: bash build.sh
-    startCommand: python -m app.main
+    startCommand: bash start.sh
+    plan: free
     envVars:
       - key: BOT_TOKEN
         sync: false
@@ -16,4 +16,4 @@ services:
       - key: DATABASE_URL
         sync: false
       - key: PYTHON_VERSION
-        value: "3.12.0"
+        value: "3.12.9"
