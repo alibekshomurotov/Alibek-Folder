@@ -27,6 +27,7 @@ def _find_cookies_file() -> Optional[str]:
         if path and os.path.exists(path):
             logger.info(f"Found cookies file at: {path}")
             return path
+    logger.warning("No cookies.txt file found in any location!")
     return None
 
 
@@ -48,6 +49,16 @@ def detect_platform(url: str) -> Optional[str]:
 def is_video_url(url: str) -> bool:
     """Check if URL is a supported video URL"""
     return detect_platform(url) is not None
+
+
+def _get_youtube_headers() -> Dict[str, str]:
+    """Get custom headers to look more like a real browser for YouTube"""
+    return {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate",
+    }
 
 
 def get_format_selector(quality: str = "720", audio_only: bool = False) -> str:
@@ -112,6 +123,7 @@ def get_ydl_opts(quality: str = "720", audio_only: bool = False,
     cookies_path = _find_cookies_file()
     if cookies_path:
         opts["cookiefile"] = cookies_path
+        logger.info(f"Using cookies file: {cookies_path}")
 
     # Audio-only post-processing
     if audio_only and config.download.ffmpeg_available:
@@ -132,19 +144,26 @@ def get_ydl_opts(quality: str = "720", audio_only: bool = False,
 
 async def extract_video_info(url: str) -> Optional[Dict[str, Any]]:
     """Extract video information without downloading"""
+    platform = detect_platform(url)
+    
     opts = {
         "quiet": True,
         "no_warnings": True,
         "extract_flat": False,
         "noplaylist": True,
-        # Use very permissive format for info extraction
-        "format": "best/bestvideo+bestaudio",
+        "format": "best",
     }
+
+    # YouTube-specific settings to bypass bot detection
+    if platform == "youtube":
+        opts["http_headers"] = _get_youtube_headers()
+        opts["extractor_args"] = {"youtube": {"player_client": ["web", "ios"]}}
 
     # Cookie support - search multiple locations
     cookies_path = _find_cookies_file()
     if cookies_path:
         opts["cookiefile"] = cookies_path
+        logger.info(f"Extract info using cookies: {cookies_path}")
 
     proxy = os.getenv("HTTP_PROXY") or os.getenv("HTTPS_PROXY")
     if proxy:
@@ -155,16 +174,26 @@ async def extract_video_info(url: str) -> Optional[Dict[str, Any]]:
             info = ydl.extract_info(url, download=False)
             return info
     except Exception as e:
-        logger.error(f"Error extracting video info: {e}")
-        # Try again with the most permissive format possible
+        logger.error(f"Error extracting video info (attempt 1): {e}")
+        # Try again with different player_client
         try:
-            opts["format"] = "best"
+            opts["extractor_args"] = {"youtube": {"player_client": ["android", "web"]}}
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
                 return info
         except Exception as e2:
-            logger.error(f"Second attempt also failed: {e2}")
-            return None
+            logger.error(f"Error extracting video info (attempt 2): {e2}")
+            # Third attempt - most basic
+            try:
+                opts["format"] = "best"
+                opts.pop("extractor_args", None)
+                opts.pop("http_headers", None)
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                    return info
+            except Exception as e3:
+                logger.error(f"Error extracting video info (attempt 3): {e3}")
+                return None
 
 
 async def download_video(url: str, quality: str = "720",
@@ -176,9 +205,15 @@ async def download_video(url: str, quality: str = "720",
         Tuple of (file_path, info_dict) or None on failure
     """
     output_path = tempfile.mkdtemp()
+    platform = detect_platform(url)
 
     try:
         opts = get_ydl_opts(quality, audio_only, output_path)
+
+        # YouTube-specific settings to bypass bot detection
+        if platform == "youtube":
+            opts["http_headers"] = _get_youtube_headers()
+            opts["extractor_args"] = {"youtube": {"player_client": ["web", "ios"]}}
 
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -212,11 +247,14 @@ async def download_video(url: str, quality: str = "720",
         return None
     except yt_dlp.utils.DownloadError as e:
         logger.error(f"Download error: {e}")
-        # Try with simpler format as fallback
+        # Try with different player_client as fallback
         try:
             output_path2 = tempfile.mkdtemp()
             opts2 = get_ydl_opts(quality, audio_only, output_path2)
             opts2["format"] = "best"
+            if platform == "youtube":
+                opts2["http_headers"] = _get_youtube_headers()
+                opts2["extractor_args"] = {"youtube": {"player_client": ["android", "web"]}}
             with yt_dlp.YoutubeDL(opts2) as ydl:
                 info = ydl.extract_info(url, download=True)
                 if info is None:
