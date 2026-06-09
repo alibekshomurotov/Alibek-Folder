@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 # Module-level cookies path cache (resolved once at startup)
 _cookies_path: Optional[str] = None
+_yt_dlp_version = yt_dlp.version.__version__
 
 
 def _find_cookies_file() -> Optional[str]:
@@ -67,6 +68,7 @@ def _find_cookies_file() -> Optional[str]:
 
 def log_cookies_status() -> None:
     """Log the current cookies status - call this at startup"""
+    logger.info(f"[yt-dlp] Version: {_yt_dlp_version}")
     path = _find_cookies_file()
     if path:
         try:
@@ -88,6 +90,24 @@ def log_cookies_status() -> None:
             if missing_critical:
                 logger.warning(f"[COOKIES] YouTube critical cookies MISSING: {missing_critical}")
                 logger.warning("[COOKIES] YouTube 'Sign in' error likely! Export fresh cookies from browser.")
+
+            # Check if cookies might be expired (look at expiry dates)
+            import time as _time
+            now = _time.time()
+            expired_count = 0
+            for line in lines:
+                if line.startswith("#") or not line.strip():
+                    continue
+                parts = line.strip().split("\t")
+                if len(parts) >= 5:
+                    try:
+                        expiry = int(parts[4])
+                        if expiry > 0 and expiry < now:
+                            expired_count += 1
+                    except (ValueError, IndexError):
+                        pass
+            if expired_count > 0:
+                logger.warning(f"[COOKIES] {expired_count} cookies are EXPIRED! Export fresh cookies from browser.")
         except Exception as e:
             logger.error(f"[COOKIES] Error reading cookies file: {e}")
     else:
@@ -158,7 +178,7 @@ def get_format_selector(quality: str = "720", audio_only: bool = False) -> str:
 
 
 def get_ydl_opts(quality: str = "720", audio_only: bool = False,
-                 output_path: str = None) -> Dict[str, Any]:
+                 output_path: str = None, use_cookies: bool = True) -> Dict[str, Any]:
     """Build yt-dlp options dict"""
     if output_path is None:
         output_path = tempfile.mkdtemp()
@@ -184,10 +204,11 @@ def get_ydl_opts(quality: str = "720", audio_only: bool = False,
     if config.download.ffmpeg_available and "+" in format_selector:
         opts["merge_output_format"] = "mp4"
 
-    # Cookie support - search multiple locations
-    cookies_path = _find_cookies_file()
-    if cookies_path:
-        opts["cookiefile"] = cookies_path
+    # Cookie support - only if use_cookies is True
+    if use_cookies:
+        cookies_path = _find_cookies_file()
+        if cookies_path:
+            opts["cookiefile"] = cookies_path
 
     # Audio-only post-processing
     if audio_only and config.download.ffmpeg_available:
@@ -206,16 +227,23 @@ def get_ydl_opts(quality: str = "720", audio_only: bool = False,
     return opts
 
 
-# Player client configurations to try for YouTube (ordered by success rate)
-_YT_PLAYER_CLIENTS = [
-    ["web"],                      # Web client - most compatible
-    ["ios"],                       # iOS client - no PO token needed
+# Player client configurations to try for YouTube
+# Phase 1: NO cookies (some clients don't need them, and bad cookies can break requests)
+# Phase 2: WITH cookies (for bot detection bypass)
+_YT_PLAYER_CLIENTS_NO_COOKIES = [
+    ["ios"],                       # iOS client - usually works without cookies
     ["android"],                   # Android client
-    ["web", "ios"],                # Web + iOS fallback
-    ["tv_embedded", "ios"],       # TV embedded - sometimes bypasses bot detection
     ["mweb"],                      # Mobile web
-    ["tv"],                        # Smart TV client
+    ["tv_embedded"],               # TV embedded
     ["android_vr"],               # Android VR client
+    ["mediaconnect"],              # Media Connect client
+]
+
+_YT_PLAYER_CLIENTS_WITH_COOKIES = [
+    ["web"],                       # Web client - needs cookies
+    ["web", "ios"],                # Web + iOS
+    ["tv"],                        # Smart TV client
+    ["tv_embedded", "ios"],       # TV embedded + iOS
 ]
 
 
@@ -233,17 +261,15 @@ async def extract_video_info(url: str) -> Optional[Dict[str, Any]]:
         "format": "best",
     }
 
-    # Cookie support
-    cookies_path = _find_cookies_file()
-    if cookies_path:
-        base_opts["cookiefile"] = cookies_path
-
     proxy = os.getenv("HTTP_PROXY") or os.getenv("HTTPS_PROXY")
     if proxy:
         base_opts["proxy"] = proxy
 
     if not is_youtube:
-        # Non-YouTube: simple extraction
+        # Non-YouTube: simple extraction with cookies
+        cookies_path = _find_cookies_file()
+        if cookies_path:
+            base_opts["cookiefile"] = cookies_path
         try:
             with yt_dlp.YoutubeDL(base_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
@@ -252,34 +278,67 @@ async def extract_video_info(url: str) -> Optional[Dict[str, Any]]:
             logger.error(f"Error extracting info from {platform}: {e}")
             return None
 
-    # YouTube: try multiple player_client configurations
-    for i, player_clients in enumerate(_YT_PLAYER_CLIENTS):
+    # YouTube: Phase 1 - try WITHOUT cookies first
+    # Bad/expired cookies can cause "Failed to extract" on ALL clients
+    cookies_path = _find_cookies_file()
+    attempt = 0
+
+    logger.info(f"[YouTube] Phase 1: Trying without cookies ({len(_YT_PLAYER_CLIENTS_NO_COOKIES)} clients)")
+    for player_clients in _YT_PLAYER_CLIENTS_NO_COOKIES:
+        attempt += 1
         opts = base_opts.copy()
         opts["http_headers"] = _get_youtube_headers()
         opts["extractor_args"] = {"youtube": {"player_client": player_clients}}
+        # NO cookies in this phase
 
         try:
-            logger.info(f"[YouTube] Extract attempt {i+1}/{len(_YT_PLAYER_CLIENTS)} with player_client={player_clients}")
+            logger.info(f"[YouTube] Extract attempt {attempt} (no cookies) with player_client={player_clients}")
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
-                logger.info(f"[YouTube] SUCCESS with player_client={player_clients}")
+                logger.info(f"[YouTube] SUCCESS (no cookies) with player_client={player_clients}")
                 return info
         except Exception as e:
             error_msg = str(e)
-            logger.warning(f"[YouTube] Attempt {i+1} failed with player_client={player_clients}: {error_msg[:100]}")
-            # Retry with different player_client for these errors:
-            # - "Sign in" (bot detection)
-            # - "Failed to extract any player response" (player client incompatibility)
-            # - "Requested format is not available" (format issue)
-            # Don't retry for permanent errors like video not found, private video, etc.
-            retryable_errors = ["Sign in", "bot", "Failed to extract", "Requested format"]
-            is_retryable = any(err in error_msg for err in retryable_errors)
-            if not is_retryable:
-                logger.error(f"[YouTube] Permanent error, stopping retries: {e}")
-                return None
+            logger.warning(f"[YouTube] Attempt {attempt} failed: {error_msg[:120]}")
             continue
 
-    logger.error(f"[YouTube] All {len(_YT_PLAYER_CLIENTS)} player_client attempts failed")
+    # YouTube: Phase 2 - try WITH cookies
+    if cookies_path:
+        logger.info(f"[YouTube] Phase 2: Trying with cookies ({len(_YT_PLAYER_CLIENTS_WITH_COOKIES)} clients)")
+        for player_clients in _YT_PLAYER_CLIENTS_WITH_COOKIES:
+            attempt += 1
+            opts = base_opts.copy()
+            opts["cookiefile"] = cookies_path
+            opts["http_headers"] = _get_youtube_headers()
+            opts["extractor_args"] = {"youtube": {"player_client": player_clients}}
+
+            try:
+                logger.info(f"[YouTube] Extract attempt {attempt} (with cookies) with player_client={player_clients}")
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                    logger.info(f"[YouTube] SUCCESS (with cookies) with player_client={player_clients}")
+                    return info
+            except Exception as e:
+                error_msg = str(e)
+                logger.warning(f"[YouTube] Attempt {attempt} failed: {error_msg[:120]}")
+                continue
+    else:
+        logger.warning("[YouTube] No cookies file - skipping Phase 2 (cookies-based attempts)")
+
+    # YouTube: Phase 3 - last resort without extractor_args
+    attempt += 1
+    logger.info("[YouTube] Phase 3: Last resort - default client without extractor_args")
+    opts = base_opts.copy()
+    if cookies_path:
+        opts["cookiefile"] = cookies_path
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            logger.info("[YouTube] SUCCESS with default client")
+            return info
+    except Exception as e:
+        logger.error(f"[YouTube] All {attempt} attempts failed. Last error: {e}")
+
     return None
 
 
@@ -291,69 +350,114 @@ async def download_video(url: str, quality: str = "720",
     Returns:
         Tuple of (file_path, info_dict) or None on failure
     """
-    output_path = tempfile.mkdtemp()
     platform = detect_platform(url)
     is_youtube = platform == "youtube"
+    cookies_path = _find_cookies_file()
+
+    if not is_youtube:
+        # Non-YouTube platforms: simple download
+        return await _download_non_youtube(url, quality, audio_only, cookies_path)
 
     # YouTube: try multiple player_client configurations
-    if is_youtube:
-        for i, player_clients in enumerate(_YT_PLAYER_CLIENTS):
+    # Phase 1: without cookies
+    attempt = 0
+    output_path = tempfile.mkdtemp()
+
+    for player_clients in _YT_PLAYER_CLIENTS_NO_COOKIES:
+        attempt += 1
+        try:
+            logger.info(f"[YouTube] Download attempt {attempt} (no cookies) player_client={player_clients} quality={quality}")
+            opts = get_ydl_opts(quality, audio_only, output_path, use_cookies=False)
+            opts["http_headers"] = _get_youtube_headers()
+            opts["extractor_args"] = {"youtube": {"player_client": player_clients}}
+
+            result = _do_download(ydl_opts=opts, output_path=output_path, audio_only=audio_only)
+            if result:
+                logger.info(f"[YouTube] Download SUCCESS (no cookies) with player_client={player_clients}")
+                return result
+        except yt_dlp.utils.MaxDownloadsExceeded:
+            logger.warning("File size exceeded maximum")
+            return None
+        except Exception as e:
+            error_msg = str(e)
+            logger.warning(f"[YouTube] Download attempt {attempt} failed: {error_msg[:120]}")
+            output_path = tempfile.mkdtemp()  # Fresh dir for next attempt
+            continue
+
+    # Phase 2: with cookies
+    if cookies_path:
+        for player_clients in _YT_PLAYER_CLIENTS_WITH_COOKIES:
+            attempt += 1
             try:
-                logger.info(f"[YouTube] Download attempt {i+1}/{len(_YT_PLAYER_CLIENTS)} with player_client={player_clients}, quality={quality}")
-                opts = get_ydl_opts(quality, audio_only, output_path)
+                logger.info(f"[YouTube] Download attempt {attempt} (with cookies) player_client={player_clients} quality={quality}")
+                opts = get_ydl_opts(quality, audio_only, output_path, use_cookies=True)
                 opts["http_headers"] = _get_youtube_headers()
                 opts["extractor_args"] = {"youtube": {"player_client": player_clients}}
 
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    info = ydl.extract_info(url, download=True)
-
-                    if info is None:
-                        continue
-
-                    # Find the downloaded file
-                    file_path = ydl.prepare_filename(info)
-
-                    # For audio with FFmpeg post-processing, the extension changes
-                    if audio_only and config.download.ffmpeg_available:
-                        base_path = os.path.splitext(file_path)[0]
-                        mp3_path = base_path + ".mp3"
-                        if os.path.exists(mp3_path):
-                            file_path = mp3_path
-
-                    if not os.path.exists(file_path):
-                        # Try to find any file in the output directory
-                        files = os.listdir(output_path)
-                        if files:
-                            file_path = os.path.join(output_path, files[0])
-                        else:
-                            logger.error("Downloaded file not found")
-                            continue
-
-                    logger.info(f"[YouTube] Download SUCCESS with player_client={player_clients}")
-                    return file_path, info
-
+                result = _do_download(ydl_opts=opts, output_path=output_path, audio_only=audio_only)
+                if result:
+                    logger.info(f"[YouTube] Download SUCCESS (with cookies) with player_client={player_clients}")
+                    return result
             except yt_dlp.utils.MaxDownloadsExceeded:
                 logger.warning("File size exceeded maximum")
                 return None
             except Exception as e:
                 error_msg = str(e)
-                logger.warning(f"[YouTube] Download attempt {i+1} failed: {error_msg[:100]}")
-                # Only retry for bot detection or player response errors
-                retryable_errors = ["Sign in", "bot", "Failed to extract", "Requested format"]
-                is_retryable = any(err in error_msg for err in retryable_errors)
-                if not is_retryable:
-                    logger.error(f"[YouTube] Permanent download error: {e}")
-                    return None
-                # Create new output dir for next attempt
+                logger.warning(f"[YouTube] Download attempt {attempt} failed: {error_msg[:120]}")
                 output_path = tempfile.mkdtemp()
                 continue
 
-        logger.error(f"[YouTube] All {len(_YT_PLAYER_CLIENTS)} download attempts failed")
-        return None
-
-    # Non-YouTube platforms: simple download
+    # Phase 3: default client
+    attempt += 1
+    logger.info("[YouTube] Phase 3: Last resort - default download")
     try:
-        opts = get_ydl_opts(quality, audio_only, output_path)
+        opts = get_ydl_opts(quality, audio_only, output_path, use_cookies=bool(cookies_path))
+        result = _do_download(ydl_opts=opts, output_path=output_path, audio_only=audio_only)
+        if result:
+            return result
+    except Exception as e:
+        logger.error(f"[YouTube] All {attempt} download attempts failed. Last error: {e}")
+
+    return None
+
+
+def _do_download(ydl_opts: Dict[str, Any], output_path: str,
+                 audio_only: bool = False) -> Optional[Tuple[str, Dict[str, Any]]]:
+    """Execute yt-dlp download and return (file_path, info) or None"""
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(download=True)
+
+        if info is None:
+            return None
+
+        file_path = ydl.prepare_filename(info)
+
+        # For audio with FFmpeg post-processing, extension changes to mp3
+        if audio_only and config.download.ffmpeg_available:
+            base_path = os.path.splitext(file_path)[0]
+            mp3_path = base_path + ".mp3"
+            if os.path.exists(mp3_path):
+                file_path = mp3_path
+
+        if not os.path.exists(file_path):
+            # Try to find any file in the output directory
+            files = os.listdir(output_path)
+            if files:
+                file_path = os.path.join(output_path, files[0])
+            else:
+                logger.error("Downloaded file not found")
+                return None
+
+        return file_path, info
+
+
+async def _download_non_youtube(url: str, quality: str, audio_only: bool,
+                                 cookies_path: Optional[str]) -> Optional[Tuple[str, Dict[str, Any]]]:
+    """Download from non-YouTube platforms"""
+    output_path = tempfile.mkdtemp()
+
+    try:
+        opts = get_ydl_opts(quality, audio_only, output_path, use_cookies=True)
 
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -361,10 +465,8 @@ async def download_video(url: str, quality: str = "720",
             if info is None:
                 return None
 
-            # Find the downloaded file
             file_path = ydl.prepare_filename(info)
 
-            # For audio with FFmpeg post-processing, the extension changes
             if audio_only and config.download.ffmpeg_available:
                 base_path = os.path.splitext(file_path)[0]
                 mp3_path = base_path + ".mp3"
@@ -372,7 +474,6 @@ async def download_video(url: str, quality: str = "720",
                     file_path = mp3_path
 
             if not os.path.exists(file_path):
-                # Try to find any file in the output directory
                 files = os.listdir(output_path)
                 if files:
                     file_path = os.path.join(output_path, files[0])
@@ -390,7 +491,7 @@ async def download_video(url: str, quality: str = "720",
         # Simple fallback
         try:
             output_path2 = tempfile.mkdtemp()
-            opts2 = get_ydl_opts(quality, audio_only, output_path2)
+            opts2 = get_ydl_opts(quality, audio_only, output_path2, use_cookies=True)
             opts2["format"] = "best"
             with yt_dlp.YoutubeDL(opts2) as ydl:
                 info = ydl.extract_info(url, download=True)
