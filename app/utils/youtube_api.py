@@ -1,3 +1,9 @@
+"""YouTube alternative downloader using Cobalt, Invidious, Piped APIs.
+
+Cobalt (cobalt.tools) - eng ishonchli, maxsus YouTube yuklash uchun yaratilgan.
+Invidious/Piped - alternative YouTube frontendlar.
+"""
+
 import logging
 import os
 import tempfile
@@ -76,10 +82,9 @@ async def _try_cobalt(url: str, quality: str = "720", audio_only: bool = False) 
     for api_url in COBALT_APIS:
         try:
             async with aiohttp.ClientSession() as session:
-                # Cobalt API ga POST so'rov
                 cobalt_quality = quality.replace("p", "")
                 if audio_only:
-                    cobalt_quality = "0"  # Cobalt da 0 = audio only
+                    cobalt_quality = "0"
 
                 payload = {
                     "url": url,
@@ -94,48 +99,52 @@ async def _try_cobalt(url: str, quality: str = "720", audio_only: bool = False) 
                     "Accept": "application/json",
                 }
 
+                logger.info(f"[Cobalt] {api_url} ga so'rov yuborilmoqda...")
                 async with session.post(
                     f"{api_url}/",
                     json=payload,
                     headers=headers,
                     timeout=aiohttp.ClientTimeout(total=20),
                 ) as resp:
+                    body = await resp.text()
+                    logger.info(f"[Cobalt] {api_url}: HTTP {resp.status} - {body[:200]}")
+
                     if resp.status != 200:
-                        body = await resp.text()
-                        logger.debug(f"[Cobalt] {api_url}: HTTP {resp.status} - {body[:100]}")
                         continue
 
-                    data = await resp.json()
+                    try:
+                        data = await resp.json()
+                    except Exception:
+                        logger.warning(f"[Cobalt] JSON parse xatosi")
+                        continue
 
-                    # Cobalt javob turlari:
-                    # "stream" - to'g'ridan-to'g'ri yuklash URL
-                    # "redirect" - redirect URL
-                    # "picker" - bir nechta variant (playlist)
-                    # "error" - xato
                     status = data.get("status", "")
 
                     if status == "error":
-                        logger.debug(f"[Cobalt] {api_url}: Xato - {data.get('error', {}).get('code', 'noma_lum')}")
+                        error_code = data.get("error", {}).get("code", "noma_lum") if isinstance(data.get("error"), dict) else str(data.get("error", ""))
+                        logger.warning(f"[Cobalt] {api_url}: Xato - {error_code}")
                         continue
 
+                    # "stream" yoki "redirect" - to'g'ridan-to'g'ri URL
                     download_url = data.get("url")
 
                     if not download_url:
-                        # Picker holatida birinchi variantni olish
                         picker = data.get("picker", [])
                         if picker and isinstance(picker, list):
                             download_url = picker[0].get("url")
 
                     if download_url:
-                        logger.info(f"[Cobalt] {api_url}: URL topildi!")
+                        logger.info(f"[Cobalt] {api_url}: Yuklash URL topildi!")
                         return {
                             "source": "cobalt",
                             "download_url": download_url,
                             "audio_only": audio_only,
                         }
+                    else:
+                        logger.warning(f"[Cobalt] {api_url}: URL topilmadi, javob: {str(data)[:200]}")
 
         except Exception as e:
-            logger.debug(f"[Cobalt] {api_url}: Xato - {str(e)[:80]}")
+            logger.warning(f"[Cobalt] {api_url}: Xato - {str(e)[:100]}")
             continue
 
     logger.warning("[Cobalt] Barcha serverlar ishlamadi")
@@ -154,7 +163,7 @@ async def _try_invidious(video_id: str) -> Optional[Dict[str, Any]]:
                 url = f"{instance}/api/v1/videos/{video_id}"
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                     if resp.status != 200:
-                        logger.debug(f"[Invidious] {instance}: HTTP {resp.status}")
+                        logger.info(f"[Invidious] {instance}: HTTP {resp.status}")
                         continue
 
                     data = await resp.json()
@@ -196,7 +205,7 @@ async def _try_piped(video_id: str) -> Optional[Dict[str, Any]]:
                 url = f"{instance}/streams/{video_id}"
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                     if resp.status != 200:
-                        logger.debug(f"[Piped] {instance}: HTTP {resp.status}")
+                        logger.info(f"[Piped] {instance}: HTTP {resp.status}")
                         continue
 
                     data = await resp.json()

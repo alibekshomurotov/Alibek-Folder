@@ -1,24 +1,22 @@
-"""Video Handler - Video download processing"""
-
 import asyncio
-import hashlib
 import logging
+import os
 from typing import Dict
 
 from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery, FSInputFile
 from aiogram.fsm.context import FSMContext
-from aiogram.filters import StateFilter
+from aiogram.fsm.filter import StateFilter
 
 from app.config import config
 from app.database.connection import get_session_factory
 from app.database.repositories.user_repo import UserRepository
 from app.services.download_service import DownloadService
-# Subscription removed - all users are free
+from app.services.subscription_service import SubscriptionService
 from app.keyboards.inline import quality_select_kb, back_to_main_kb
 from app.utils.downloader import (
     detect_platform, is_video_url,
-    cleanup_file,
+    format_file_size, cleanup_file,
 )
 from app.utils.formatter import (
     format_video_info, format_video_caption, format_loading_step,
@@ -31,23 +29,12 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 # Store video info temporarily (in production, use Redis)
-# Key: short_hash (8 chars) -> video data
 _video_cache: Dict[str, dict] = {}
-
-
-def _make_cache_key(video_id: str) -> str:
-    """Create a short cache key from video_id to avoid Telegram 64-byte callback data limit"""
-    return hashlib.md5(video_id.encode()).hexdigest()[:8]
 
 
 @router.message(StateFilter(None), ~F.text.startswith("/"))
 async def handle_video_link(message: Message, state: FSMContext):
     """Handle video link messages"""
-    # Skip reply keyboard button texts
-    skip_texts = {"📥 Video yuklash", "👤 Profil", "⭐ Premium", "ℹ️ Yordam", "🔧 Admin panel"}
-    if message.text in skip_texts:
-        return
-
     # Extract URL from message
     url = extract_url(message.text or "")
 
@@ -62,6 +49,19 @@ async def handle_video_link(message: Message, state: FSMContext):
             parse_mode="HTML",
         )
         return
+
+    # Check subscription
+    if not config.bot.is_admin(message.from_user.id):
+        is_subscribed, unsubscribed = await SubscriptionService.is_subscribed(
+            message.bot, message.from_user.id
+        )
+        if not is_subscribed:
+            from app.keyboards.inline import subscription_check_kb
+            from app.utils.formatter import format_subscription_required
+            text = format_subscription_required(unsubscribed)
+            kb = subscription_check_kb(unsubscribed)
+            await message.answer(text, reply_markup=kb, parse_mode="HTML")
+            return
 
     # Register user if not exists
     session_factory = await get_session_factory()
@@ -81,11 +81,21 @@ async def handle_video_link(message: Message, state: FSMContext):
         _animate_loading(message.bot, loading_msg)
     )
 
+    platform = detect_platform(url)
+
     try:
         # Extract video info
         result = await DownloadService.process_url(url)
 
         if result is None:
+            # Info extraction failed - for YouTube, try DIRECT download
+            # (Cobalt API may work even when info extraction fails)
+            if platform == "youtube":
+                animation_task.cancel()
+                logger.info("[YouTube] Info failed, trying direct download via Cobalt/API...")
+                await _try_direct_youtube_download(message, url, loading_msg)
+                return
+
             animation_task.cancel()
             await loading_msg.edit_text(
                 format_error("download_error"),
@@ -97,10 +107,9 @@ async def handle_video_link(message: Message, state: FSMContext):
         # Cancel animation
         animation_task.cancel()
 
-        # Cache video info using short hash key
-        original_video_id = result["info"].get("id", str(hash(url)))
-        cache_key = _make_cache_key(original_video_id)
-        _video_cache[cache_key] = {
+        # Cache video info
+        video_id = result["info"].get("id", str(hash(url)))
+        _video_cache[video_id] = {
             "url": url,
             "info": result["info"],
             "platform": result["platform"],
@@ -114,7 +123,7 @@ async def handle_video_link(message: Message, state: FSMContext):
 
         # Show video info with quality selection
         text = format_video_info(result["info"], result["platform"])
-        kb = quality_select_kb(cache_key, result["available_qualities"])
+        kb = quality_select_kb(video_id, result["available_qualities"])
 
         # Try to send thumbnail
         thumbnail_url = result["info"].get("thumbnail")
@@ -149,27 +158,95 @@ async def handle_video_link(message: Message, state: FSMContext):
             pass
 
 
+async def _try_direct_youtube_download(message: Message, url: str, loading_msg: Message):
+    """YouTube uchun to'g'ridan-to'g'ri yuklash (info olinmagan holatda).
+
+    Datacenter IP da yt-dlp info qaytarolmaydi, lekin Cobalt API
+    to'g'ridan-to'g'ri yuklash URL berishi mumkin.
+    """
+    try:
+        await loading_msg.edit_text("▶️ YouTube video yuklanmoqda...")
+
+        from app.utils.youtube_api import download_youtube_via_api
+        result = await download_youtube_via_api(url, "720", audio_only=False)
+
+        if result is None:
+            # MP3 ham sinab ko'rish
+            await loading_msg.edit_text("▶️ YouTube video yuklanmoqda (2-usul)...")
+            from app.utils.downloader import download_video
+            result = await download_video(url, "720", audio_only=False)
+
+        if result is None:
+            await loading_msg.edit_text(
+                format_error("download_error"),
+                reply_markup=back_to_main_kb(),
+                parse_mode="HTML",
+            )
+            return
+
+        file_path, info = result
+        file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+
+        # Faylni yuborish
+        try:
+            if file_size_mb > config.download.max_file_size_mb:
+                await message.answer_document(
+                    document=FSInputFile(file_path),
+                    caption=f"▶️ YouTube Video\n📦 {file_size_mb:.1f}MB\n🤖 Downloader Pro",
+                )
+            else:
+                try:
+                    await message.answer_video(
+                        video=FSInputFile(file_path),
+                        caption=f"▶️ YouTube Video\n🤖 Downloader Pro",
+                    )
+                except Exception:
+                    await message.answer_document(
+                        document=FSInputFile(file_path),
+                        caption=f"▶️ YouTube Video\n🤖 Downloader Pro",
+                    )
+
+            await loading_msg.delete()
+
+        except Exception as e:
+            logger.error(f"Error sending YouTube file: {e}")
+            await loading_msg.edit_text(
+                format_error("server_error"),
+                reply_markup=back_to_main_kb(),
+                parse_mode="HTML",
+            )
+        finally:
+            cleanup_file(file_path)
+
+    except Exception as e:
+        logger.error(f"Direct YouTube download error: {e}")
+        try:
+            await loading_msg.edit_text(
+                format_error("download_error"),
+                reply_markup=back_to_main_kb(),
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+
+
 @router.callback_query(F.data.startswith("quality_"))
 async def handle_quality_select(callback: CallbackQuery, state: FSMContext):
     """Handle quality selection"""
-    # Parse callback data: quality_{cache_key}_{quality}
-    # cache_key is 8 chars, quality is like "1080p", "720p", "mp3"
+    # Parse callback data: quality_{video_id}_{quality}
     parts = callback.data.split("_")
     if len(parts) < 3:
         await callback.answer("❌ Xatolik", show_alert=True)
         return
 
-    cache_key = parts[1]
+    video_id = parts[1]
     quality = parts[2]
     audio_only = quality == "mp3"
 
     # Get cached video info
-    video_data = _video_cache.get(cache_key)
+    video_data = _video_cache.get(video_id)
     if not video_data:
-        await callback.answer(
-            "⏰ Sessiya tugadi. Qayta link yuboring.",
-            show_alert=True
-        )
+        await callback.answer("⏰ Sessiya tugadi. Qayta link yuboring.", show_alert=True)
         return
 
     url = video_data["url"]
@@ -280,8 +357,7 @@ async def callback_download(callback: CallbackQuery):
         f"  🐦 X (Twitter)\n"
         f"  📌 Pinterest\n"
         f"  👻 Snapchat\n"
-        f"  🧵 Threads\n\n"
-        f"🎵 MP3 uchun ham link yuboring va Audio MP3 tugmasini bosing!",
+        f"  🧵 Threads",
         reply_markup=back_to_main_kb(),
         parse_mode="HTML",
     )
