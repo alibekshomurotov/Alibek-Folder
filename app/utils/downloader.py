@@ -222,14 +222,51 @@ async def _extract_youtube_info(url: str) -> Optional[Dict[str, Any]]:
     """YouTube video ma'lumotlarini olish.
 
     STRATEGIYA:
-    1. Cobalt API - eng tez va ishonchli
+    1. Cobalt API - tez va ishonchli (o'z serverimiz)
     2. Invidious/Piped API - alternative frontendlar
-    3. yt-dlp (faqat 2 ta urinish) - oxirgi chora
+    3. yt-dlp (1 urinish) - oxirgi chora
     """
-    # === 1-BOSQICH: Cobalt API (faqat info emas, yuklash uchun) ===
-    # Cobalt faqat yuklash URL beradi, info uchun Invidious ishlatamiz
+    from app.utils.youtube_api import _extract_video_id
 
-    # === 2-BOSQICH: Invidious/Piped API (info olish uchun) ===
+    video_id = _extract_video_id(url)
+
+    # === 1-BOSQICH: Cobalt API (o'z serverimiz) ===
+    # Cobalt info bermaydi, lekin video mavjudligini tasdiqlaydi
+    # va biz basic info yaratamiz
+    cobalt_api_url = os.getenv("COBALT_API_URL", "")
+    cobalt_api_key = os.getenv("COBALT_API_KEY", "")
+
+    if cobalt_api_url and "cobalt.tools" not in cobalt_api_url:
+        logger.info(f"[YouTube] Cobalt orqali tekshirilmoqda: {cobalt_api_url}")
+        try:
+            from app.utils.youtube_api import _try_cobalt
+            cobalt_result = await _try_cobalt(url, "720", False)
+            if cobalt_result and cobalt_result.get("download_url"):
+                logger.info("[YouTube] Cobalt: Video mavjud! Info yaratilmoqda...")
+                # Cobalt info bermaydi, basic info yaratamiz
+                return {
+                    "id": video_id or "unknown",
+                    "title": "YouTube Video",
+                    "description": "",
+                    "duration": 0,
+                    "view_count": 0,
+                    "like_count": 0,
+                    "uploader": "YouTube",
+                    "thumbnail": f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg" if video_id else "",
+                    "webpage_url": url,
+                    "extractor": "youtube",
+                    "formats": [
+                        {"format_id": "720p", "height": 720, "ext": "mp4", "vcodec": "unknown", "acodec": "unknown"},
+                        {"format_id": "480p", "height": 480, "ext": "mp4", "vcodec": "unknown", "acodec": "unknown"},
+                        {"format_id": "360p", "height": 360, "ext": "mp4", "vcodec": "unknown", "acodec": "unknown"},
+                        {"format_id": "mp3", "height": None, "ext": "mp3", "vcodec": "none", "acodec": "unknown"},
+                    ],
+                    "_cobalt_available": True,  # Belggi: Cobalt orqali yuklash mumkin
+                }
+        except Exception as e:
+            logger.warning(f"[YouTube] Cobalt xatosi: {e}")
+
+    # === 2-BOSQICH: Invidious/Piped API ===
     logger.info("[YouTube] API orqali ma'lumot olinmoqda...")
     try:
         from app.utils.youtube_api import get_youtube_info_via_api, convert_api_info_to_ytdlp
@@ -246,10 +283,8 @@ async def _extract_youtube_info(url: str) -> Optional[Dict[str, Any]]:
         logger.warning(f"[YouTube] API xatosi: {e}")
 
     # === 3-BOSQICH: yt-dlp (1 marta, tezkor) ===
-    # Datacenter IP da yt-dlp ishlamaydi - faqat 1 marta sinab ko'ramiz
     logger.info("[YouTube] yt-dlp sinab ko'rilmoqda (1 urinish)...")
     cookies_path = _find_cookies_file()
-    proxy = os.getenv("YOUTUBE_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("HTTPS_PROXY")
 
     try:
         opts = {
@@ -269,8 +304,7 @@ async def _extract_youtube_info(url: str) -> Optional[Dict[str, Any]]:
         else:
             opts["extractor_args"] = {"youtube": {"player_client": ["android"]}}
 
-        # Proxy bilan emas, proxiesz sinash (proxy datacenter bo'lsa behuda)
-        logger.info(f"[YouTube] yt-dlp: {'cookies+tv' if cookies_path else 'android'} (proxiesz)")
+        logger.info(f"[YouTube] yt-dlp: {'cookies+tv' if cookies_path else 'android'}")
 
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -348,14 +382,32 @@ async def _download_youtube(url: str, quality: str = "720",
     """YouTube videosini yuklab olish.
 
     STRATEGIYA:
-    1. API orqali yuklash (Cobalt + Invidious + Piped) - faqat 1 marta
-    2. yt-dlp - faqat 1 ta urinish (proxy bo'lsa yoki cookies bilan)
+    1. Cobalt API (o'z serverimiz) - eng tez va ishonchli
+    2. Invidious/Piped API - alternative
+    3. yt-dlp - oxirgi chora
 
     Eslatma: Datacenter IP (Render, Heroku) da YouTube bloklaydi.
-    YOUTUBE_PROXY env o'zgaruvchisi bilan residential proxy qo'shing.
+    O'z Cobalt serveringizni ishga tushiring va COBALT_API_URL qo'shing.
     """
-    # === 1-BOSQICH: API orqali yuklash (Cobalt + Invidious + Piped) ===
-    logger.info("[YouTube] API orqali yuklanmoqda (Cobalt/Invidious/Piped)...")
+    # === 1-BOSQICH: Cobalt API (o'z serverimiz) ===
+    cobalt_api_url = os.getenv("COBALT_API_URL", "")
+    if cobalt_api_url and "cobalt.tools" not in cobalt_api_url:
+        logger.info(f"[YouTube] Cobalt orqali yuklanmoqda: {cobalt_api_url}")
+        try:
+            from app.utils.youtube_api import _try_cobalt, _download_from_url, _make_basic_info, _extract_video_id
+            cobalt_result = await _try_cobalt(url, quality, audio_only)
+            if cobalt_result and cobalt_result.get("download_url"):
+                video_id = _extract_video_id(url)
+                result = await _download_from_url(cobalt_result["download_url"], video_id, audio_only)
+                if result:
+                    info = _make_basic_info(url, video_id, audio_only)
+                    logger.info("[YouTube] Cobalt orqali yuklash MUVOFAQIYATLI!")
+                    return result, info
+        except Exception as e:
+            logger.warning(f"[YouTube] Cobalt yuklash xatosi: {e}")
+
+    # === 2-BOSQICH: Invidious/Piped API ===
+    logger.info("[YouTube] API orqali yuklanmoqda (Invidious/Piped)...")
     try:
         from app.utils.youtube_api import download_youtube_via_api
         result = await download_youtube_via_api(url, quality, audio_only)
@@ -365,8 +417,7 @@ async def _download_youtube(url: str, quality: str = "720",
     except Exception as e:
         logger.warning(f"[YouTube] API yuklash xatosi: {e}")
 
-    # === 2-BOSQICH: yt-dlp orqali yuklash (1 urinish, tezkor) ===
-    # Datacenter IP da yt-dlp ishlamaydi - faqat 1 marta sinab ko'ramiz
+    # === 3-BOSQICH: yt-dlp orqali yuklash (1 urinish) ===
     cookies_path = _find_cookies_file()
 
     output_path = tempfile.mkdtemp()
