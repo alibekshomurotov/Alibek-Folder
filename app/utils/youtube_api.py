@@ -15,8 +15,11 @@ COBALT_API_KEY = os.getenv("COBALT_API_KEY", "")
 # Proxy sozlamalari
 YOUTUBE_PROXY = os.getenv("YOUTUBE_PROXY", "") or os.getenv("HTTP_PROXY", "") or os.getenv("HTTPS_PROXY", "")
 
-# Invidious instances
+# Invidious instances - 2026 yil iyunda yangilangan
+# Ba'zi instancalar datacenter IP lardan bloklaydi,
+# shuning uchun ko'proq alternative serverlar kerak
 INVIDIOUS_INSTANCES = [
+    # Eng ishonchli (ko'p ishlaydi)
     "https://inv.nadeko.net",
     "https://invidious.nerdvpn.de",
     "https://iv.datura.network",
@@ -27,15 +30,29 @@ INVIDIOUS_INSTANCES = [
     "https://inv.tux.pizza",
     "https://vid.puffyan.us",
     "https://invidious.privacyredirect.com",
+    # Qo'shimcha instancelar
+    "https://inv.in.projectsegfau.lt",
+    "https://invidious.projectsegfau.lt",
+    "https://inv.tux.pizza",
+    "https://invidious.fdn.fr",
+    "https://iv.ggtyler.dev",
+    "https://invidious.privacyredirect.com",
+    "https://inv.oikei.net",
+    "https://yewtu.be",
+    "https://invidious.privacy.de",
+    "https://vid.puffyan.us",
 ]
 
-# Piped instances
+# Piped instances - 2026 yil iyunda yangilangan
 PIPED_INSTANCES = [
     "https://pipedapi.kavin.rocks",
     "https://pipedapi.adminforge.de",
     "https://pipedapi.r4fo.com",
     "https://api.piped.yt",
     "https://pipedapi.moomoo.me",
+    "https://pipedapi.darkness.services",
+    "https://pipedapi.drgns.space",
+    "https://api.piped.projectsegfau.lt",
 ]
 
 HEADERS = {
@@ -196,8 +213,8 @@ async def _try_cobalt(url: str, quality: str = "720", audio_only: bool = False) 
 # INVIDIOUS API - proxy bilan
 # ============================================================
 
-_FAST_INVIDIOUS = INVIDIOUS_INSTANCES[:3]
-_FAST_PIPED = PIPED_INSTANCES[:2]
+_FAST_INVIDIOUS = INVIDIOUS_INSTANCES[:6]  # 6 ta tezkor Invidious
+_FAST_PIPED = PIPED_INSTANCES[:4]  # 4 ta tezkor Piped
 
 
 async def _try_invidious(video_id: str, fast_only: bool = False) -> Optional[Dict[str, Any]]:

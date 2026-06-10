@@ -165,7 +165,10 @@ def _build_download_opts(output_path: str, quality: str = "720",
     opts["format"] = fmt
     opts["outtmpl"] = os.path.join(output_path, "%(id)s.%(ext)s")
     opts["extract_flat"] = False
-    opts["max_filesize"] = config.download.max_file_size_mb * 1024 * 1024
+    # DIQQAT: max_filesize OLIB TASHLANDI!
+    # yt-dlp ichida MaxDownloadsExceeded atributi yo'q,
+    # shu sababli AttributeError chiqardi.
+    # Fayl hajmini yuklagandan keyin tekshiramiz.
 
     if config.download.ffmpeg_available and "+" in fmt:
         opts["merge_output_format"] = "mp4"
@@ -353,9 +356,11 @@ async def _download_youtube(url: str, quality: str = "720",
     """YouTube videosini yuklab olish.
 
     STRATEGIYA:
-    1. Cobalt API - eng tez va ishonchli
-    2. Invidious/Piped API - alternative
-    3. yt-dlp (faqat 2 ta urinish) - oxirgi chora
+    1. API orqali yuklash (Cobalt + Invidious + Piped) - faqat 1 marta
+    2. yt-dlp - faqat 1 ta urinish (proxy bo'lsa yoki cookies bilan)
+
+    Eslatma: Datacenter IP (Render, Heroku) da YouTube bloklaydi.
+    YOUTUBE_PROXY env o'zgaruvchisi bilan residential proxy qo'shing.
     """
     # === 1-BOSQICH: API orqali yuklash (Cobalt + Invidious + Piped) ===
     logger.info("[YouTube] API orqali yuklanmoqda (Cobalt/Invidious/Piped)...")
@@ -368,29 +373,37 @@ async def _download_youtube(url: str, quality: str = "720",
     except Exception as e:
         logger.warning(f"[YouTube] API yuklash xatosi: {e}")
 
-    # === 2-BOSQICH: yt-dlp orqali yuklash (faqat 2 ta urinish) ===
-    logger.info("[YouTube] yt-dlp orqali yuklanmoqda...")
+    # === 2-BOSQICH: yt-dlp orqali yuklash (faqat 1 ta urinish) ===
+    # Datacenter IP da yt-dlp ko'p urinishlar vaqtni behuda sarflaydi
     cookies_path = _find_cookies_file()
-    output_path = tempfile.mkdtemp()
-    fmt_quality = get_format_selector(quality, audio_only)
     proxy = os.getenv("YOUTUBE_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("HTTPS_PROXY")
 
-    attempts = []
+    # Agar proxy yo'q va datacenter IP da bo'lsak, yt-dlp ishlamaydi
+    # Lekin baribir 1 marta urinib ko'ramiz (ehtimol cookies yordam berar)
+    output_path = tempfile.mkdtemp()
+    fmt_quality = get_format_selector(quality, audio_only)
 
-    if cookies_path:
-        attempts.append(("cookies + tv_embedded", True, fmt_quality, ["tv_embedded"]))
-        attempts.append(("cookies + best", True, "best", None))
+    # Bir nechta yt-dlp strategiyasini sinash
+    yt_strategies = [
+        # 1: best format - eng sodda, ishlash ehtimoli yuqori
+        ("best", "best"),
+        # 2: format selector bilan
+        ("format_selector", fmt_quality),
+    ]
 
-    attempts.append(("no-cookies + android", False, fmt_quality, ["android"]))
-
-    for label, use_cookies, fmt, player_client in attempts:
+    for strat_label, fmt in yt_strategies:
         try:
+            use_cookies = bool(cookies_path)
+            label = f"{strat_label} ({'cookies' if use_cookies else 'no-cookies'})"
             logger.info(f"[YouTube] yt-dlp yuklash: {label}")
 
             opts = _build_download_opts(output_path, quality, audio_only, use_cookies, fmt)
 
-            if player_client:
-                opts["extractor_args"] = {"youtube": {"player_client": player_client}}
+            if use_cookies:
+                opts["extractor_args"] = {"youtube": {"player_client": ["tv_embedded"]}}
+            else:
+                opts["extractor_args"] = {"youtube": {"player_client": ["android"]}}
+
             if proxy:
                 opts["proxy"] = proxy
 
@@ -401,7 +414,7 @@ async def _download_youtube(url: str, quality: str = "720",
                 info = ydl.extract_info(url, download=True)
 
                 if info is None:
-                    output_path = tempfile.mkdtemp()
+                    logger.warning("[YouTube] yt-dlp info qaytarmadi")
                     continue
 
                 file_path = ydl.prepare_filename(info)
@@ -417,19 +430,33 @@ async def _download_youtube(url: str, quality: str = "720",
                     if files:
                         file_path = os.path.join(output_path, files[0])
                     else:
-                        output_path = tempfile.mkdtemp()
+                        logger.warning("[YouTube] yt-dlp fayl yaratmadi")
                         continue
+
+                # Fayl hajmini tekshirish (max_filesize olib tashlangan)
+                file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+                if file_size_mb > config.download.max_file_size_mb:
+                    logger.warning(f"[YouTube] Fayl juda katta: {file_size_mb:.1f}MB")
+                    try:
+                        os.remove(file_path)
+                    except OSError:
+                        pass
+                    return None
 
                 logger.info(f"[YouTube] yt-dlp yuklash MUVOFAQIYATLI: {label}")
                 return file_path, info
 
-        except yt_dlp.utils.MaxDownloadsExceeded:
-            logger.warning("Fayl hajmi cheklovdan oshdi")
-            return None
+        except AttributeError as e:
+            # yt-dlp.utils.MaxDownloadsExceeded yo'q - bu ma'lum xato
+            if "MaxDownloads" in str(e):
+                logger.warning("[YouTube] Fayl hajmi cheklovdan oshdi (yt-dlp ichki xatosi)")
+                return None
+            logger.warning(f"[YouTube] yt-dlp AttributeError: {str(e)[:100]}")
         except Exception as e:
-            logger.warning(f"[YouTube] yt-dlp '{label}' xato: {str(e)[:100]}")
-            output_path = tempfile.mkdtemp()
-            continue
+            if "MaxDownloads" in str(type(e).__name__) or "MaxDownloads" in str(e):
+                logger.warning("[YouTube] Fayl hajmi cheklovdan oshdi")
+                return None
+            logger.warning(f"[YouTube] yt-dlp xato ({strat_label}): {str(e)[:100]}")
 
     logger.error("[YouTube] Barcha yuklash usullari muvaffaqiyatsiz")
     return None
