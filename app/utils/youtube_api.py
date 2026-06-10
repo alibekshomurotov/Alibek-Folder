@@ -1,9 +1,3 @@
-"""YouTube alternative downloader using Cobalt, Invidious, Piped APIs.
-
-Cobalt (cobalt.tools) - eng ishonchli, maxsus YouTube yuklash uchun yaratilgan.
-Invidious/Piped - alternative YouTube frontendlar.
-"""
-
 import logging
 import os
 import tempfile
@@ -14,10 +8,12 @@ import aiohttp
 
 logger = logging.getLogger(__name__)
 
-# Cobalt API - eng ishonchli YouTube yuklash xizmati
-COBALT_APIS = [
-    "https://api.cobalt.tools",
-]
+# Cobalt API - JWT autentifikatsiya talab qiladi
+COBALT_API_URL = os.getenv("COBALT_API_URL", "https://api.cobalt.tools")
+COBALT_API_KEY = os.getenv("COBALT_API_KEY", "")
+
+# Proxy sozlamalari
+YOUTUBE_PROXY = os.getenv("YOUTUBE_PROXY", "") or os.getenv("HTTP_PROXY", "") or os.getenv("HTTPS_PROXY", "")
 
 # Invidious instances
 INVIDIOUS_INSTANCES = [
@@ -48,6 +44,42 @@ HEADERS = {
 }
 
 
+def _get_proxy_connector() -> Optional[aiohttp.TCPConnector]:
+    """Proxy uchun aiohttp connector yaratish."""
+    if not YOUTUBE_PROXY:
+        return None
+
+    proxy_type = YOUTUBE_PROXY.lower()
+
+    # SOCKS5 proxy
+    if proxy_type.startswith("socks5"):
+        try:
+            from aiohttp_socks import ProxyConnector
+            logger.info(f"[Proxy] SOCKS5 ishlatilmoqda: {YOUTUBE_PROXY.split('@')[-1] if '@' in YOUTUBE_PROXY else YOUTUBE_PROXY}")
+            return ProxyConnector.from_url(YOUTUBE_PROXY)
+        except ImportError:
+            logger.warning("[Proxy] aiohttp-socks o'rnatilmagan! pip install aiohttp-socks")
+            return None
+        except Exception as e:
+            logger.warning(f"[Proxy] SOCKS5 connector xatosi: {e}")
+            return None
+
+    # HTTP/HTTPS proxy
+    if proxy_type.startswith("http"):
+        # HTTP proxy uchun maxsus connector kerak emas
+        # aiohttp session ga proxy parametri uzatiladi
+        return None
+
+    return None
+
+
+def _get_proxy_url() -> Optional[str]:
+    """aiohttp uchun proxy URL qaytarish."""
+    if YOUTUBE_PROXY:
+        return YOUTUBE_PROXY
+    return None
+
+
 def _extract_video_id(url: str) -> Optional[str]:
     """YouTube video ID sini URL dan ajratib olish."""
     parsed = urlparse(url)
@@ -70,98 +102,115 @@ def _extract_video_id(url: str) -> Optional[str]:
 
 
 # ============================================================
-# COBALT API - Eng ishonchli usul
+# COBALT API
 # ============================================================
 
 async def _try_cobalt(url: str, quality: str = "720", audio_only: bool = False) -> Optional[Dict[str, Any]]:
-    """Cobalt API orqali video yuklab olish.
+    """Cobalt API orqali video yuklab olish."""
+    api_url = COBALT_API_URL
 
-    Cobalt - maxsus YouTube yuklash uchun yaratilgan bepul xizmat.
-    U o'z serverida (oddiy IP bilan) YouTube'ga murojaat qiladi.
-    """
-    for api_url in COBALT_APIS:
-        try:
-            async with aiohttp.ClientSession() as session:
-                cobalt_quality = quality.replace("p", "")
-                if audio_only:
-                    cobalt_quality = "0"
+    if not COBALT_API_KEY and "cobalt.tools" in api_url:
+        logger.warning("[Cobalt] API kalit yo'q! COBALT_API_KEY env o'zgaruvchisini o'rnating.")
+        return None
 
-                payload = {
-                    "url": url,
-                    "videoQuality": cobalt_quality,
-                    "filenameStyle": "basic",
-                    "downloadMode": "audio" if audio_only else "auto",
-                }
+    try:
+        connector = _get_proxy_connector()
+        async with aiohttp.ClientSession(connector=connector) as session:
+            cobalt_quality = quality.replace("p", "")
+            if audio_only:
+                cobalt_quality = "0"
 
-                headers = {
-                    **HEADERS,
-                    "Content-Type": "application/json",
-                    "Accept": "application/json",
-                }
+            payload = {
+                "url": url,
+                "videoQuality": cobalt_quality,
+                "filenameStyle": "basic",
+                "downloadMode": "audio" if audio_only else "auto",
+            }
 
-                logger.info(f"[Cobalt] {api_url} ga so'rov yuborilmoqda...")
-                async with session.post(
-                    f"{api_url}/",
-                    json=payload,
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=20),
-                ) as resp:
-                    body = await resp.text()
-                    logger.info(f"[Cobalt] {api_url}: HTTP {resp.status} - {body[:200]}")
+            headers = {
+                **HEADERS,
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            }
 
-                    if resp.status != 200:
-                        continue
+            if COBALT_API_KEY:
+                headers["Authorization"] = f"Bearer {COBALT_API_KEY}"
 
-                    try:
-                        data = await resp.json()
-                    except Exception:
-                        logger.warning(f"[Cobalt] JSON parse xatosi")
-                        continue
+            proxy = _get_proxy_url() if not connector else None
 
-                    status = data.get("status", "")
+            logger.info(f"[Cobalt] {api_url} ga so'rov yuborilmoqda...")
+            async with session.post(
+                f"{api_url}/",
+                json=payload,
+                headers=headers,
+                proxy=proxy,
+                timeout=aiohttp.ClientTimeout(total=20),
+            ) as resp:
+                body = await resp.text()
+                logger.info(f"[Cobalt] {api_url}: HTTP {resp.status} - {body[:200]}")
 
-                    if status == "error":
-                        error_code = data.get("error", {}).get("code", "noma_lum") if isinstance(data.get("error"), dict) else str(data.get("error", ""))
-                        logger.warning(f"[Cobalt] {api_url}: Xato - {error_code}")
-                        continue
+                if resp.status == 400 and "jwt.missing" in body:
+                    logger.error("[Cobalt] JWT autentifikatsiya talab qilinadi!")
+                    return None
 
-                    # "stream" yoki "redirect" - to'g'ridan-to'g'ri URL
-                    download_url = data.get("url")
+                if resp.status != 200:
+                    return None
 
-                    if not download_url:
-                        picker = data.get("picker", [])
-                        if picker and isinstance(picker, list):
-                            download_url = picker[0].get("url")
+                try:
+                    data = await resp.json()
+                except Exception:
+                    logger.warning("[Cobalt] JSON parse xatosi")
+                    return None
 
-                    if download_url:
-                        logger.info(f"[Cobalt] {api_url}: Yuklash URL topildi!")
-                        return {
-                            "source": "cobalt",
-                            "download_url": download_url,
-                            "audio_only": audio_only,
-                        }
-                    else:
-                        logger.warning(f"[Cobalt] {api_url}: URL topilmadi, javob: {str(data)[:200]}")
+                status = data.get("status", "")
 
-        except Exception as e:
-            logger.warning(f"[Cobalt] {api_url}: Xato - {str(e)[:100]}")
-            continue
+                if status == "error":
+                    error_code = data.get("error", {}).get("code", "noma_lum") if isinstance(data.get("error"), dict) else str(data.get("error", ""))
+                    logger.warning(f"[Cobalt] {api_url}: Xato - {error_code}")
+                    return None
 
-    logger.warning("[Cobalt] Barcha serverlar ishlamadi")
+                download_url = data.get("url")
+
+                if not download_url:
+                    picker = data.get("picker", [])
+                    if picker and isinstance(picker, list):
+                        download_url = picker[0].get("url")
+
+                if download_url:
+                    logger.info(f"[Cobalt] {api_url}: Yuklash URL topildi!")
+                    return {
+                        "source": "cobalt",
+                        "download_url": download_url,
+                        "audio_only": audio_only,
+                    }
+                else:
+                    logger.warning(f"[Cobalt] {api_url}: URL topilmadi")
+
+    except Exception as e:
+        logger.warning(f"[Cobalt] {api_url}: Xato - {str(e)[:100]}")
+
     return None
 
 
 # ============================================================
-# INVIDIOUS API
+# INVIDIOUS API - proxy bilan
 # ============================================================
 
-async def _try_invidious(video_id: str) -> Optional[Dict[str, Any]]:
-    """Invidious API orqali video ma'lumotlarini olish."""
-    for instance in INVIDIOUS_INSTANCES:
+_FAST_INVIDIOUS = INVIDIOUS_INSTANCES[:3]
+_FAST_PIPED = PIPED_INSTANCES[:2]
+
+
+async def _try_invidious(video_id: str, fast_only: bool = False) -> Optional[Dict[str, Any]]:
+    """Invidious API orqali video ma'lumotlarini olish (proxy bilan)."""
+    instances = _FAST_INVIDIOUS if fast_only else INVIDIOUS_INSTANCES
+    connector = _get_proxy_connector()
+    proxy = _get_proxy_url() if not connector else None
+
+    for instance in instances:
         try:
-            async with aiohttp.ClientSession(headers=HEADERS) as session:
+            async with aiohttp.ClientSession(connector=connector, headers=HEADERS) as session:
                 url = f"{instance}/api/v1/videos/{video_id}"
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                async with session.get(url, proxy=proxy, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                     if resp.status != 200:
                         logger.info(f"[Invidious] {instance}: HTTP {resp.status}")
                         continue
@@ -172,7 +221,6 @@ async def _try_invidious(video_id: str) -> Optional[Dict[str, Any]]:
                     audio_formats = [f for f in formats if f.get("type", "").startswith("audio")]
 
                     if not video_formats and not audio_formats:
-                        logger.debug(f"[Invidious] {instance}: formatlar topilmadi")
                         continue
 
                     logger.info(
@@ -194,16 +242,20 @@ async def _try_invidious(video_id: str) -> Optional[Dict[str, Any]]:
 
 
 # ============================================================
-# PIPED API
+# PIPED API - proxy bilan
 # ============================================================
 
-async def _try_piped(video_id: str) -> Optional[Dict[str, Any]]:
-    """Piped API orqali video ma'lumotlarini olish."""
-    for instance in PIPED_INSTANCES:
+async def _try_piped(video_id: str, fast_only: bool = False) -> Optional[Dict[str, Any]]:
+    """Piped API orqali video ma'lumotlarini olish (proxy bilan)."""
+    instances = _FAST_PIPED if fast_only else PIPED_INSTANCES
+    connector = _get_proxy_connector()
+    proxy = _get_proxy_url() if not connector else None
+
+    for instance in instances:
         try:
-            async with aiohttp.ClientSession(headers=HEADERS) as session:
+            async with aiohttp.ClientSession(connector=connector, headers=HEADERS) as session:
                 url = f"{instance}/streams/{video_id}"
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                async with session.get(url, proxy=proxy, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                     if resp.status != 200:
                         logger.info(f"[Piped] {instance}: HTTP {resp.status}")
                         continue
@@ -213,7 +265,6 @@ async def _try_piped(video_id: str) -> Optional[Dict[str, Any]]:
                     audio_streams = data.get("audioStreams", [])
 
                     if not video_streams and not audio_streams:
-                        logger.debug(f"[Piped] {instance}: formatlar topilmadi")
                         continue
 
                     logger.info(
@@ -239,10 +290,7 @@ async def _try_piped(video_id: str) -> Optional[Dict[str, Any]]:
 # ============================================================
 
 async def get_youtube_info_via_api(url: str) -> Optional[Dict[str, Any]]:
-    """YouTube video ma'lumotlarini API orqali olish.
-
-    Tartib: Cobalt → Invidious → Piped
-    """
+    """YouTube video ma'lumotlarini API orqali olish."""
     video_id = _extract_video_id(url)
     if not video_id:
         logger.error("[API] Video ID topilmadi")
@@ -250,13 +298,21 @@ async def get_youtube_info_via_api(url: str) -> Optional[Dict[str, Any]]:
 
     logger.info(f"[API] Video ID: {video_id}")
 
-    # Invidious (info olish uchun eng yaxshi)
-    result = await _try_invidious(video_id)
+    # Tezkor urinish
+    result = await _try_invidious(video_id, fast_only=True)
     if result:
         return result
 
-    # Piped
-    result = await _try_piped(video_id)
+    result = await _try_piped(video_id, fast_only=True)
+    if result:
+        return result
+
+    # To'liq urinish
+    result = await _try_invidious(video_id, fast_only=False)
+    if result:
+        return result
+
+    result = await _try_piped(video_id, fast_only=False)
     if result:
         return result
 
@@ -266,28 +322,21 @@ async def get_youtube_info_via_api(url: str) -> Optional[Dict[str, Any]]:
 
 async def download_youtube_via_api(url: str, quality: str = "720",
                                     audio_only: bool = False) -> Optional[Tuple[str, Dict[str, Any]]]:
-    """YouTube videosini API orqali yuklab olish.
-
-    Tartib:
-    1. Cobalt - eng tez va ishonchli (to'g'ridan-to'g'ri URL beradi)
-    2. Invidious - format tanlash imkoniyati bor
-    3. Piped - alternative
-    """
+    """YouTube videosini API orqali yuklab olish."""
     video_id = _extract_video_id(url)
 
-    # === 1: COBALT - eng tez usul ===
+    # 1: COBALT
     logger.info("[API] 1-usul: Cobalt orqali yuklanmoqda...")
     cobalt_result = await _try_cobalt(url, quality, audio_only)
     if cobalt_result:
         result = await _download_from_url(cobalt_result["download_url"], video_id, audio_only)
         if result:
-            # Cobalt dan info ham olish kerak (UI uchun)
             info = _make_basic_info(url, video_id, audio_only)
             return result, info
 
-    # === 2: INVIDIOUS ===
+    # 2: INVIDIOUS
     logger.info("[API] 2-usul: Invidious orqali yuklanmoqda...")
-    inv_result = await _try_invidious(video_id)
+    inv_result = await _try_invidious(video_id, fast_only=True)
     if inv_result:
         download_url, file_ext = _find_best_invidious_download(inv_result["data"], quality, audio_only)
         if download_url:
@@ -296,9 +345,9 @@ async def download_youtube_via_api(url: str, quality: str = "720",
                 info = convert_api_info_to_ytdlp(inv_result)
                 return result, info
 
-    # === 3: PIPED ===
+    # 3: PIPED
     logger.info("[API] 3-usul: Piped orqali yuklanmoqda...")
-    piped_result = await _try_piped(video_id)
+    piped_result = await _try_piped(video_id, fast_only=True)
     if piped_result:
         download_url, file_ext = _find_best_piped_download(piped_result["data"], quality, audio_only)
         if download_url:
@@ -328,8 +377,11 @@ async def _download_from_url(url: str, video_id: str, audio_only: bool,
         from app.config import config as app_config
         max_size = app_config.download.max_file_size_mb * 1024 * 1024
 
-        async with aiohttp.ClientSession(headers=HEADERS) as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=300)) as resp:
+        connector = _get_proxy_connector()
+        proxy = _get_proxy_url() if not connector else None
+
+        async with aiohttp.ClientSession(connector=connector, headers=HEADERS) as session:
+            async with session.get(url, proxy=proxy, timeout=aiohttp.ClientTimeout(total=120)) as resp:
                 if resp.status != 200:
                     logger.error(f"[API] Yuklash HTTP xatosi: {resp.status}")
                     return None
@@ -361,7 +413,7 @@ async def _download_from_url(url: str, video_id: str, audio_only: bool,
 
 
 def _make_basic_info(url: str, video_id: str, audio_only: bool) -> Dict[str, Any]:
-    """Cobalt uchun asosiy info yaratish (UI da ko'rsatish uchun)."""
+    """Cobalt uchun asosiy info yaratish."""
     return {
         "id": video_id or "unknown",
         "title": "YouTube Video",
@@ -393,8 +445,6 @@ def _find_best_invidious_download(data: Dict, quality: str, audio_only: bool) ->
         return None, "mp3"
 
     target_height = int(quality.replace("p", ""))
-
-    # Pre-merged formats (video+audio birga) - eng yaxshi
     format_streams = data.get("formatStreams", [])
     best = None
     best_diff = 99999
@@ -407,7 +457,6 @@ def _find_best_invidious_download(data: Dict, quality: str, audio_only: bool) ->
             height = int(quality_label.replace("p", ""))
         except ValueError:
             continue
-
         diff = abs(height - target_height)
         if diff < best_diff:
             best_diff = diff
@@ -449,7 +498,6 @@ def _find_best_piped_download(data: Dict, quality: str, audio_only: bool) -> Tup
             height = int(q)
         except (ValueError, TypeError):
             continue
-
         diff = abs(height - target_height)
         if diff < best_diff:
             best_diff = diff
@@ -462,7 +510,7 @@ def _find_best_piped_download(data: Dict, quality: str, audio_only: bool) -> Tup
 
 
 # ============================================================
-# YT-DLP FORMATIGA O'GIRISH (UI uchun)
+# YT-DLP FORMATIGA O'GIRISH
 # ============================================================
 
 def convert_api_info_to_ytdlp(api_result: Dict[str, Any]) -> Dict[str, Any]:
