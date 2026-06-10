@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import os
+import subprocess
+import tempfile
 from typing import Dict
 
 from aiogram import Router, F, Bot
@@ -30,6 +32,71 @@ router = Router()
 
 # Store video info temporarily (in production, use Redis)
 _video_cache: Dict[str, dict] = {}
+
+
+def _ensure_mp4(file_path: str) -> str:
+    """Fayl mp4 formatida ekanligini ta'minlash.
+
+    Telegram faqat mp4 formatidagi videolarni to'g'ri ko'rsatadi
+    va gallereyaga saqlash imkonini beradi. Agar fayl boshqa formatda
+    bo'lsa (webm, mkv va h.k.), ffmpeg bilan mp4 ga o'tkazamiz.
+    """
+    if not os.path.exists(file_path):
+        return file_path
+
+    # Fayl kengaytmasini tekshirish
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext == ".mp4":
+        return file_path
+
+    # Fayl allaqachon mp4 bo'lishi mumkin (kengaytma noto'g'ri)
+    # FFmpeg bor bo'lsa, tekshiramiz
+    if not config.download.ffmpeg_available:
+        # FFmpeg yo'q, fayl nomini o'zgartiramiz
+        new_path = file_path.rsplit(".", 1)[0] + ".mp4"
+        os.rename(file_path, new_path)
+        return new_path
+
+    try:
+        # FFmpeg bilan mp4 ga konvertatsiya
+        new_path = file_path.rsplit(".", 1)[0] + ".mp4"
+        logger.info(f"[Video] Konvertatsiya: {ext} → mp4")
+
+        result = subprocess.run(
+            ["ffmpeg", "-i", file_path, "-c:v", "libx264",
+             "-c:a", "aac", "-movflags", "+faststart",
+             "-preset", "fast", "-crf", "28",
+             "-y", new_path],
+            capture_output=True, timeout=60
+        )
+
+        if result.returncode == 0 and os.path.exists(new_path):
+            # Eski faylni o'chirish
+            try:
+                os.remove(file_path)
+            except OSError:
+                pass
+            logger.info("[Video] Konvertatsiya muvaffaqiyatli")
+            return new_path
+        else:
+            logger.warning(f"[Video] Konvertatsiya xatosi, fayl nomi o'zgartiriladi")
+            # Konvertatsiya muvaffaqiyatsiz - faqat nomini o'zgartiramiz
+            if not os.path.exists(new_path):
+                os.rename(file_path, new_path)
+            return new_path
+
+    except subprocess.TimeoutExpired:
+        logger.warning("[Video] Konvertatsiya timeout, fayl nomi o'zgartiriladi")
+        new_path = file_path.rsplit(".", 1)[0] + ".mp4"
+        if not os.path.exists(new_path):
+            os.rename(file_path, new_path)
+        return new_path
+    except Exception as e:
+        logger.warning(f"[Video] Konvertatsiya xatosi: {e}")
+        new_path = file_path.rsplit(".", 1)[0] + ".mp4"
+        if not os.path.exists(new_path):
+            os.rename(file_path, new_path)
+        return new_path
 
 
 @router.message(StateFilter(None), ~F.text.startswith("/"))
@@ -88,15 +155,25 @@ async def handle_video_link(message: Message, state: FSMContext):
         result = await DownloadService.process_url(url)
 
         if result is None:
-            # Info extraction failed - for YouTube, try DIRECT download
-            # (Cobalt API may work even when info extraction fails)
+            animation_task.cancel()
+
+            # YouTube uchun maxsus xato xabari
             if platform == "youtube":
-                animation_task.cancel()
-                logger.info("[YouTube] Info failed, trying direct download via Cobalt/API...")
-                await _try_direct_youtube_download(message, url, loading_msg)
+                await loading_msg.edit_text(
+                    "❌ <b>YouTube videosini yuklab bo'lmadi</b>\n\n"
+                    "🔍 Sabab: Server IP manzili YouTube tomonidan bloklangan.\n\n"
+                    "💡 <b>Yechimlar:</b>\n"
+                    "1. Residential proxy qo'shing (YOUTUBE_PROXY env)\n"
+                    "2. O'zingizning Cobalt serveringizni ishga tushiring\n"
+                    "   → https://github.com/imputnet/cobalt\n"
+                    "   → COBALT_API_URL va COBALT_API_KEY env o'rnating\n"
+                    "3. Boshqa hosting xizmatiga o'ting\n\n"
+                    "📱 Boshqa platformalar (TikTok, Instagram va h.k.) ishlaydi!",
+                    reply_markup=back_to_main_kb(),
+                    parse_mode="HTML",
+                )
                 return
 
-            animation_task.cancel()
             await loading_msg.edit_text(
                 format_error("download_error"),
                 reply_markup=back_to_main_kb(),
@@ -158,78 +235,6 @@ async def handle_video_link(message: Message, state: FSMContext):
             pass
 
 
-async def _try_direct_youtube_download(message: Message, url: str, loading_msg: Message):
-    """YouTube uchun to'g'ridan-to'g'ri yuklash (info olinmagan holatda).
-
-    Datacenter IP da yt-dlp info qaytarolmaydi, lekin Cobalt API
-    to'g'ridan-to'g'ri yuklash URL berishi mumkin.
-    """
-    try:
-        await loading_msg.edit_text("▶️ YouTube video yuklanmoqda...")
-
-        from app.utils.youtube_api import download_youtube_via_api
-        result = await download_youtube_via_api(url, "720", audio_only=False)
-
-        if result is None:
-            # MP3 ham sinab ko'rish
-            await loading_msg.edit_text("▶️ YouTube video yuklanmoqda (2-usul)...")
-            from app.utils.downloader import download_video
-            result = await download_video(url, "720", audio_only=False)
-
-        if result is None:
-            await loading_msg.edit_text(
-                format_error("download_error"),
-                reply_markup=back_to_main_kb(),
-                parse_mode="HTML",
-            )
-            return
-
-        file_path, info = result
-        file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-
-        # Faylni yuborish
-        try:
-            if file_size_mb > config.download.max_file_size_mb:
-                await message.answer_document(
-                    document=FSInputFile(file_path),
-                    caption=f"▶️ YouTube Video\n📦 {file_size_mb:.1f}MB\n🤖 Downloader Pro",
-                )
-            else:
-                try:
-                    await message.answer_video(
-                        video=FSInputFile(file_path),
-                        caption=f"▶️ YouTube Video\n🤖 Downloader Pro",
-                    )
-                except Exception:
-                    await message.answer_document(
-                        document=FSInputFile(file_path),
-                        caption=f"▶️ YouTube Video\n🤖 Downloader Pro",
-                    )
-
-            await loading_msg.delete()
-
-        except Exception as e:
-            logger.error(f"Error sending YouTube file: {e}")
-            await loading_msg.edit_text(
-                format_error("server_error"),
-                reply_markup=back_to_main_kb(),
-                parse_mode="HTML",
-            )
-        finally:
-            cleanup_file(file_path)
-
-    except Exception as e:
-        logger.error(f"Direct YouTube download error: {e}")
-        try:
-            await loading_msg.edit_text(
-                format_error("download_error"),
-                reply_markup=back_to_main_kb(),
-                parse_mode="HTML",
-            )
-        except Exception:
-            pass
-
-
 @router.callback_query(F.data.startswith("quality_"))
 async def handle_quality_select(callback: CallbackQuery, state: FSMContext):
     """Handle quality selection"""
@@ -270,6 +275,17 @@ async def handle_quality_select(callback: CallbackQuery, state: FSMContext):
         animation_task.cancel()
 
         if result is None:
+            # YouTube uchun maxsus xato xabari
+            platform = video_data.get("platform", "")
+            if platform == "youtube":
+                await loading_msg.edit_text(
+                    "❌ <b>YouTube videosini yuklab bo'lmadi</b>\n\n"
+                    "Server IP bloklangan. Administrator bilan bog'laning.",
+                    reply_markup=back_to_main_kb(),
+                    parse_mode="HTML",
+                )
+                return
+
             await loading_msg.edit_text(
                 format_error("download_error"),
                 reply_markup=back_to_main_kb(),
@@ -283,30 +299,11 @@ async def handle_quality_select(callback: CallbackQuery, state: FSMContext):
         # Send the file
         try:
             if audio_only:
-                # Send as audio
-                await callback.message.answer_audio(
-                    audio=FSInputFile(file_path),
-                    caption=f"🎵 MP3 Audio\n🤖 Downloader Pro",
-                )
-            elif file_size_mb > config.download.max_file_size_mb:
-                # Send as document if too large
-                await callback.message.answer_document(
-                    document=FSInputFile(file_path),
-                    caption=format_video_caption(result["info"], quality.upper()),
-                )
+                # Audio faylni yuborish
+                await _send_audio(callback, file_path, result["info"])
             else:
-                # Send as video
-                try:
-                    await callback.message.answer_video(
-                        video=FSInputFile(file_path),
-                        caption=format_video_caption(result["info"], quality.upper()),
-                    )
-                except Exception:
-                    # If send_video fails, try as document
-                    await callback.message.answer_document(
-                        document=FSInputFile(file_path),
-                        caption=format_video_caption(result["info"], quality.upper()),
-                    )
+                # Video faylni yuborish
+                await _send_video(callback, file_path, result["info"], quality, file_size_mb)
 
             await loading_msg.delete()
 
@@ -332,6 +329,67 @@ async def handle_quality_select(callback: CallbackQuery, state: FSMContext):
             )
         except Exception:
             pass
+
+
+async def _send_video(callback: CallbackQuery, file_path: str, info: dict,
+                       quality: str, file_size_mb: float):
+    """Videoni Telegramga yuborish - gallereyaga saqlash imkoni bilan.
+
+    MUHIM: supports_streaming=True qo'shish kerak!
+    Bu bo'lmasa, Telegram videoni "hujjat" sifatida ko'rsatadi
+    va telefonga saqlab bo'lmaydi.
+    """
+    # Faylni mp4 formatiga keltirish
+    file_path = _ensure_mp4(file_path)
+
+    # Thumbnail URL
+    thumbnail_url = info.get("thumbnail", "")
+
+    caption = format_video_caption(info, quality.upper())
+
+    if file_size_mb > config.download.max_file_size_mb:
+        # Juda katta fayl - document sifatida yuborish
+        await callback.message.answer_document(
+            document=FSInputFile(file_path),
+            caption=caption,
+        )
+        return
+
+    # Video sifatida yuborish - supports_streaming MUHIM!
+    try:
+        video_file = FSInputFile(file_path)
+        await callback.message.answer_video(
+            video=video_file,
+            caption=caption,
+            supports_streaming=True,  # ← BU MUHIM! Gallereyaga saqlash uchun
+        )
+    except Exception as e:
+        logger.warning(f"[Video] answer_video xatosi: {e}, document sifatida yuborilmoqda...")
+        # Agar video sifatida yuborib bo'lmasa - document sifatida
+        try:
+            await callback.message.answer_document(
+                document=FSInputFile(file_path),
+                caption=caption,
+            )
+        except Exception as e2:
+            logger.error(f"[Video] document sifatida ham yuborib bo'lmadi: {e2}")
+            raise
+
+
+async def _send_audio(callback: CallbackQuery, file_path: str, info: dict):
+    """Audioni Telegramga yuborish."""
+    # MP3 fayl nomini to'g'rilash
+    title = info.get("title", "Audio")
+    # Fayl nomida maxsus belgilarni olib tashlash
+    safe_title = "".join(c for c in title if c.isalnum() or c in " -_").strip()[:50]
+
+    caption = f"🎵 {safe_title}\n🤖 Downloader Pro"
+
+    await callback.message.answer_audio(
+        audio=FSInputFile(file_path),
+        caption=caption,
+        title=safe_title,
+    )
 
 
 @router.callback_query(F.data == "cancel_download")
