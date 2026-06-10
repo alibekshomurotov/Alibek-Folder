@@ -1,8 +1,11 @@
+"""Video Handler - Video download processing"""
+
 import asyncio
 import logging
 import os
 import subprocess
 import tempfile
+import time
 from typing import Dict
 
 from aiogram import Router, F, Bot
@@ -32,6 +35,7 @@ router = Router()
 
 # Store video info temporarily (in production, use Redis)
 _video_cache: Dict[str, dict] = {}
+_CACHE_TTL = 1800  # 30 daqiqa (sekundlarda)
 
 
 def _ensure_mp4(file_path: str) -> str:
@@ -190,12 +194,18 @@ async def handle_video_link(message: Message, state: FSMContext):
             "url": url,
             "info": result["info"],
             "platform": result["platform"],
+            "cached_at": time.time(),
         }
 
-        # Clean cache if too large
+        # Clean old cache entries (TTL + max size)
+        now = time.time()
+        expired = [k for k, v in _video_cache.items() if now - v.get("cached_at", 0) > _CACHE_TTL]
+        for k in expired:
+            del _video_cache[k]
+
         if len(_video_cache) > 100:
-            oldest = list(_video_cache.keys())[:50]
-            for k in oldest:
+            oldest = sorted(_video_cache.items(), key=lambda x: x[1].get("cached_at", 0))[:50]
+            for k, _ in oldest:
                 del _video_cache[k]
 
         # Show video info with quality selection
@@ -239,19 +249,55 @@ async def handle_video_link(message: Message, state: FSMContext):
 async def handle_quality_select(callback: CallbackQuery, state: FSMContext):
     """Handle quality selection"""
     # Parse callback data: quality_{video_id}_{quality}
-    parts = callback.data.split("_")
-    if len(parts) < 3:
+    # Format: quality_VIDEOID_quality
+    # DIQQAT: video_id da _ belgisi bo'lishi mumkin!
+    # Shuning uchun faqat birinchi va oxirgi _ bilan ajratamiz
+    data = callback.data  # e.g. quality_abc123_720p or quality_DZVD_MBN1J-_960p
+    prefix = "quality_"
+    if not data.startswith(prefix):
         await callback.answer("❌ Xatolik", show_alert=True)
         return
 
-    video_id = parts[1]
-    quality = parts[2]
+    remainder = data[len(prefix):]  # e.g. abc123_720p or DZVD_MBN1J-_960p
+    last_underscore = remainder.rfind("_")
+    if last_underscore == -1:
+        await callback.answer("❌ Xatolik", show_alert=True)
+        return
+
+    video_id = remainder[:last_underscore]  # e.g. abc123 or DZVD_MBN1J-
+    quality = remainder[last_underscore + 1:]  # e.g. 720p or 960p
     audio_only = quality == "mp3"
 
     # Get cached video info
     video_data = _video_cache.get(video_id)
+    if video_data:
+        # TTL tekshirish
+        if time.time() - video_data.get("cached_at", 0) > _CACHE_TTL:
+            del _video_cache[video_id]
+            video_data = None
+
     if not video_data:
+        # Callback data dan video_id noto'g'ri ajratilgan bo'lishi mumkin
+        # Eski usul bilan ham sinab ko'ramiz
+        parts = callback.data.split("_")
+        if len(parts) >= 3:
+            # O'rta qismni birlashtirib ko'ramiz (video_id da _ bo'lishi mumkin)
+            alt_video_id = "_".join(parts[1:-1])
+            video_data = _video_cache.get(alt_video_id)
+            if video_data:
+                if time.time() - video_data.get("cached_at", 0) > _CACHE_TTL:
+                    del _video_cache[alt_video_id]
+                    video_data = None
+                else:
+                    video_id = alt_video_id
+
+    if not video_data:
+        logger.warning(f"[Video] Sessiya tugadi: video_id={video_id}, cache_keys={list(_video_cache.keys())[:5]}")
         await callback.answer("⏰ Sessiya tugadi. Qayta link yuboring.", show_alert=True)
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
         return
 
     url = video_data["url"]
@@ -395,10 +441,18 @@ async def _send_audio(callback: CallbackQuery, file_path: str, info: dict):
 @router.callback_query(F.data == "cancel_download")
 async def cancel_download(callback: CallbackQuery, state: FSMContext):
     """Cancel download"""
-    await callback.message.edit_text(
-        "❌ Yuklash bekor qilindi.",
-        reply_markup=back_to_main_kb(),
-    )
+    try:
+        await callback.message.edit_text(
+            "❌ Yuklash bekor qilindi.",
+            reply_markup=back_to_main_kb(),
+        )
+    except Exception as e:
+        # Xabar allaqachon o'chirilgan yoki o'zgartirilgan bo'lishi mumkin
+        logger.debug(f"cancel_download edit_text xatosi: {e}")
+        try:
+            await callback.answer("❌ Bekor qilindi")
+        except Exception:
+            pass
 
 
 @router.callback_query(F.data == "download")

@@ -1,21 +1,22 @@
-FROM python:3.12-slim
+    FROM ghcr.io/imputnet/cobalt:latest
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    ffmpeg \
-    gcc \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
+    ENV API_URL=https://alibek00001-cobalt-api.hf.space
+    ENV API_PORT=7860
 
-WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+    RUN cat > /init.sh << 'ENDSCRIPT'
 
-# Force upgrade yt-dlp to latest (critical for YouTube)
-RUN pip install --upgrade --no-cache-dir yt-dlp
+    if [ -n "$YOUTUBE_COOKIES" ]; then
+        mkdir -p /data
+        printf '%s' "$YOUTUBE_COOKIES" > /data/cookies.txt
+        export COOKIE_PATH=/data/cookies.txt
+        echo "[INIT] YouTube cookies loaded!"
+    else
+        echo "[INIT] No YouTube cookies provided - YouTube may not work"
+    fi
+    exec "$@"
+    ENDSCRIPT
+    RUN chmod +x /init.sh
 
-COPY . .
-
-# Use start.sh which upgrades yt-dlp before each start
-CMD ["bash", "start.sh"]
+    EXPOSE 7860
+    ENTRYPOINT ["/init.sh"]
