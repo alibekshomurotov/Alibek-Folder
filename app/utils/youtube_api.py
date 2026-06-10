@@ -139,11 +139,21 @@ def _extract_video_id(url: str) -> Optional[str]:
 
 async def _try_cobalt(url: str, quality: str = "720", audio_only: bool = False) -> Optional[Dict[str, Any]]:
     """Cobalt API orqali video yuklab olish."""
-    api_url = COBALT_API_URL
+    # Har safar env dan o'qish (modul yuklanganda emas)
+    api_url = os.getenv("COBALT_API_URL", "")
+    api_key = os.getenv("COBALT_API_KEY", "")
 
-    if not COBALT_API_KEY and "cobalt.tools" in api_url:
-        logger.warning("[Cobalt] API kalit yo'q! COBALT_API_KEY env o'zgaruvchisini o'rnating.")
+    if not api_url:
+        logger.debug("[Cobalt] COBALT_API_URL o'rnatilmagan")
         return None
+
+    # Faqat rasmiy cobalt.tools API uchun kalit talab qilinadi
+    # O'z serverimizda (HF Space) kalit shart emas!
+    if not api_key and ("cobalt.tools" in api_url or "api.cobalt.tools" == api_url.rstrip("/")):
+        logger.warning("[Cobalt] Rasmiy API uchun COBALT_API_KEY talab qilinadi!")
+        return None
+
+    logger.info(f"[Cobalt] {api_url} ga so'rov yuborilmoqda (kalit: {'bor' if api_key else 'yo\'q'})...")
 
     try:
         connector = _get_proxy_connector()
@@ -167,10 +177,9 @@ async def _try_cobalt(url: str, quality: str = "720", audio_only: bool = False) 
                 "Accept": "application/json",
             }
 
-            if COBALT_API_KEY:
-                headers["Authorization"] = f"Bearer {COBALT_API_KEY}"
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
 
-            logger.info(f"[Cobalt] {api_url} ga so'rov yuborilmoqda...")
             async with session.post(
                 f"{api_url}/",
                 json=payload,
@@ -179,10 +188,14 @@ async def _try_cobalt(url: str, quality: str = "720", audio_only: bool = False) 
                 timeout=aiohttp.ClientTimeout(total=20),
             ) as resp:
                 body = await resp.text()
-                logger.info(f"[Cobalt] {api_url}: HTTP {resp.status} - {body[:200]}")
+                logger.info(f"[Cobalt] HTTP {resp.status} - {body[:300]}")
 
-                if resp.status == 400 and "jwt.missing" in body:
-                    logger.error("[Cobalt] JWT autentifikatsiya talab qilinadi!")
+                if resp.status == 400 and ("jwt.missing" in body or "jwt.invalid" in body):
+                    logger.error("[Cobalt] JWT autentifikatsiya xatosi! COBALT_API_KEY ni tekshiring.")
+                    return None
+
+                if resp.status == 401:
+                    logger.error("[Cobalt] 401 Ruxsat yo'q! COBALT_API_KEY noto'g'ri bo'lishi mumkin.")
                     return None
 
                 if resp.status != 200:
@@ -390,7 +403,13 @@ async def _try_piped(video_id: str, fast_only: bool = False) -> Optional[Dict[st
 # ============================================================
 
 async def get_youtube_info_via_api(url: str) -> Optional[Dict[str, Any]]:
-    """YouTube video ma'lumotlarini API orqali olish."""
+    """YouTube video ma'lumotlarini API orqali olish.
+
+    STRATEGIYA:
+    1. Cobalt API - o'z serverimiz, eng ishonchli
+    2. Invidious - tezkor, keyin to'liq
+    3. Piped - tezkor, keyin to'liq
+    """
     video_id = _extract_video_id(url)
     if not video_id:
         logger.error("[API] Video ID topilmadi")
@@ -398,20 +417,39 @@ async def get_youtube_info_via_api(url: str) -> Optional[Dict[str, Any]]:
 
     logger.info(f"[API] Video ID: {video_id}")
 
-    # Tezkor urinish
+    # === 1-USUL: Cobalt API (o'z serverimiz) ===
+    cobalt_result = await _try_cobalt(url, "720", False)
+    if cobalt_result and cobalt_result.get("download_url"):
+        logger.info("[API] Cobalt orqali video mavjudligi tasdiqlandi!")
+        # Cobalt to'liq info bermaydi, lekin mavjudligini tasdiqlaydi
+        return {
+            "source": "cobalt",
+            "data": {
+                "title": "YouTube Video",
+                "download_url": cobalt_result["download_url"],
+            },
+            "video_id": video_id,
+            "_cobalt_available": True,
+        }
+    else:
+        logger.info("[API] Cobalt ishlamadi, Invidious/Piped sinab ko'rilmoqda...")
+
+    # === 2-USUL: Invidious (tezkor) ===
     result = await _try_invidious(video_id, fast_only=True)
     if result:
         return result
 
+    # === 3-USUL: Piped (tezkor) ===
     result = await _try_piped(video_id, fast_only=True)
     if result:
         return result
 
-    # To'liq urinish
+    # === 4-USUL: Invidious (to'liq) ===
     result = await _try_invidious(video_id, fast_only=False)
     if result:
         return result
 
+    # === 5-USUL: Piped (to'liq) ===
     result = await _try_piped(video_id, fast_only=False)
     if result:
         return result
@@ -640,7 +678,14 @@ def convert_api_info_to_ytdlp(api_result: Dict[str, Any]) -> Dict[str, Any]:
     data = api_result["data"]
     video_id = api_result["video_id"]
 
-    if source == "invidious":
+    if source == "cobalt":
+        # Cobalt to'liq info bermaydi, basic info yaratamiz
+        return _make_basic_info(
+            f"https://www.youtube.com/watch?v={video_id}",
+            video_id,
+            False
+        )
+    elif source == "invidious":
         return _convert_invidious(data, video_id)
     else:
         return _convert_piped(data, video_id)

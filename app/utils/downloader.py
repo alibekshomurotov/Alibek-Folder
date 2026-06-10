@@ -232,11 +232,9 @@ async def _extract_youtube_info(url: str) -> Optional[Dict[str, Any]]:
 
     # === 1-BOSQICH: Cobalt API (o'z serverimiz) ===
     # Cobalt info bermaydi, lekin video mavjudligini tasdiqlaydi
-    # va biz basic info yaratamiz
     cobalt_api_url = os.getenv("COBALT_API_URL", "")
-    cobalt_api_key = os.getenv("COBALT_API_KEY", "")
 
-    if cobalt_api_url and "cobalt.tools" not in cobalt_api_url:
+    if cobalt_api_url:
         logger.info(f"[YouTube] Cobalt orqali tekshirilmoqda: {cobalt_api_url}")
         try:
             from app.utils.youtube_api import _try_cobalt
@@ -261,10 +259,14 @@ async def _extract_youtube_info(url: str) -> Optional[Dict[str, Any]]:
                         {"format_id": "360p", "height": 360, "ext": "mp4", "vcodec": "unknown", "acodec": "unknown"},
                         {"format_id": "mp3", "height": None, "ext": "mp3", "vcodec": "none", "acodec": "unknown"},
                     ],
-                    "_cobalt_available": True,  # Belggi: Cobalt orqali yuklash mumkin
+                    "_cobalt_available": True,
                 }
+            else:
+                logger.info("[YouTube] Cobalt javob bermadi, keyingi usulga o'tilmoqda...")
         except Exception as e:
             logger.warning(f"[YouTube] Cobalt xatosi: {e}")
+    else:
+        logger.info("[YouTube] COBALT_API_URL o'rnatilmagan, Cobalt o'tkazib yuborildi")
 
     # === 2-BOSQICH: Invidious/Piped API ===
     logger.info("[YouTube] API orqali ma'lumot olinmoqda...")
@@ -391,7 +393,7 @@ async def _download_youtube(url: str, quality: str = "720",
     """
     # === 1-BOSQICH: Cobalt API (o'z serverimiz) ===
     cobalt_api_url = os.getenv("COBALT_API_URL", "")
-    if cobalt_api_url and "cobalt.tools" not in cobalt_api_url:
+    if cobalt_api_url:
         logger.info(f"[YouTube] Cobalt orqali yuklanmoqda: {cobalt_api_url}")
         try:
             from app.utils.youtube_api import _try_cobalt, _download_from_url, _make_basic_info, _extract_video_id
@@ -403,8 +405,14 @@ async def _download_youtube(url: str, quality: str = "720",
                     info = _make_basic_info(url, video_id, audio_only)
                     logger.info("[YouTube] Cobalt orqali yuklash MUVOFAQIYATLI!")
                     return result, info
+                else:
+                    logger.warning("[YouTube] Cobalt URL topildi lekin yuklab bo'lmadi")
+            else:
+                logger.info("[YouTube] Cobalt javob bermadi, keyingi usulga o'tilmoqda...")
         except Exception as e:
             logger.warning(f"[YouTube] Cobalt yuklash xatosi: {e}")
+    else:
+        logger.info("[YouTube] COBALT_API_URL o'rnatilmagan, Cobalt o'tkazib yuborildi")
 
     # === 2-BOSQICH: Invidious/Piped API ===
     logger.info("[YouTube] API orqali yuklanmoqda (Invidious/Piped)...")
