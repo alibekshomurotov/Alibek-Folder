@@ -245,65 +245,43 @@ async def _extract_youtube_info(url: str) -> Optional[Dict[str, Any]]:
     except Exception as e:
         logger.warning(f"[YouTube] API xatosi: {e}")
 
-    # === 3-BOSQICH: yt-dlp (avval proxiesz, keyin proxy bilan) ===
-    logger.info("[YouTube] yt-dlp orqali sinab ko'rilmoqda...")
+    # === 3-BOSQICH: yt-dlp (1 marta, tezkor) ===
+    # Datacenter IP da yt-dlp ishlamaydi - faqat 1 marta sinab ko'ramiz
+    logger.info("[YouTube] yt-dlp sinab ko'rilmoqda (1 urinish)...")
     cookies_path = _find_cookies_file()
     proxy = os.getenv("YOUTUBE_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("HTTPS_PROXY")
-    proxy_broken = False
 
-    strategies = [
-        ("cookies + tv_embedded", True, ["tv_embedded"]),
-        ("no-cookies + android", False, ["android"]),
-    ]
+    try:
+        opts = {
+            "format": "all",
+            "quiet": True,
+            "no_warnings": True,
+            "extract_flat": False,
+            "noplaylist": True,
+            "geo_bypass": "US",
+            "geo_bypass_country": "US",
+            "socket_timeout": 10,
+        }
 
-    for label, use_cookies, player_client in strategies:
-        if use_cookies and not cookies_path:
-            continue
+        if cookies_path:
+            opts["cookiefile"] = cookies_path
+            opts["extractor_args"] = {"youtube": {"player_client": ["tv_embedded"]}}
+        else:
+            opts["extractor_args"] = {"youtube": {"player_client": ["android"]}}
 
-        # Avval proxiesz, keyin proxy bilan
-        for use_proxy in [False, True]:
-            if use_proxy and (not proxy or proxy_broken):
-                continue
+        # Proxy bilan emas, proxiesz sinash (proxy datacenter bo'lsa behuda)
+        logger.info(f"[YouTube] yt-dlp: {'cookies+tv' if cookies_path else 'android'} (proxiesz)")
 
-            try:
-                opts = {
-                    "format": "all",
-                    "quiet": True,
-                    "no_warnings": True,
-                    "extract_flat": False,
-                    "noplaylist": True,
-                    "geo_bypass": "US",
-                    "geo_bypass_country": "US",
-                }
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            if info:
+                formats = info.get("formats", [])
+                if _has_video_audio(formats):
+                    logger.info("[YouTube] yt-dlp MUVOFAQIYATLI!")
+                    return info
 
-                if use_cookies:
-                    opts["cookiefile"] = cookies_path
-                if player_client:
-                    opts["extractor_args"] = {"youtube": {"player_client": player_client}}
-                if use_proxy:
-                    opts["proxy"] = proxy
-
-                proxy_label = "proxy" if use_proxy else "proxiesz"
-                logger.info(f"[YouTube] yt-dlp: {label} ({proxy_label})")
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    info = ydl.extract_info(url, download=False)
-                    if info:
-                        formats = info.get("formats", [])
-                        if _has_video_audio(formats):
-                            logger.info(f"[YouTube] yt-dlp MUVOFAQIYATLI: {label} ({proxy_label})")
-                            return info
-
-            except Exception as e:
-                err_str = str(e)
-                # Proxy xatosi - keyingi urinishda proxiesz
-                if use_proxy and ("ProxyError" in err_str or "Errno 9" in err_str
-                                   or "Connection refused" in err_str
-                                   or "Errno 111" in err_str):
-                    logger.warning(f"[YouTube] Proxy ishlamadi: {err_str[:60]}")
-                    proxy_broken = True
-                    continue
-                logger.debug(f"[YouTube] {label}: {err_str[:80]}")
-                continue
+    except Exception as e:
+        logger.debug(f"[YouTube] yt-dlp: {str(e)[:80]}")
 
     logger.error("[YouTube] Barcha usullar muvaffaqiyatsiz")
     return None
@@ -387,111 +365,75 @@ async def _download_youtube(url: str, quality: str = "720",
     except Exception as e:
         logger.warning(f"[YouTube] API yuklash xatosi: {e}")
 
-    # === 2-BOSQICH: yt-dlp orqali yuklash ===
-    # MUHIM: Avval PROXIESZ sinaymiz, keyin proxy bilan.
-    # Buzilgan proxy barcha so'rovlarni buzadi!
+    # === 2-BOSQICH: yt-dlp orqali yuklash (1 urinish, tezkor) ===
+    # Datacenter IP da yt-dlp ishlamaydi - faqat 1 marta sinab ko'ramiz
     cookies_path = _find_cookies_file()
-    proxy = os.getenv("YOUTUBE_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("HTTPS_PROXY")
-    proxy_broken = False
 
     output_path = tempfile.mkdtemp()
-    fmt_quality = get_format_selector(quality, audio_only)
 
-    # Bir nechta yt-dlp strategiyasini sinash
-    yt_strategies = [
-        # 1: best format - eng sodda, ishlash ehtimoli yuqori
-        ("best", "best"),
-        # 2: format selector bilan
-        ("format_selector", fmt_quality),
-    ]
+    try:
+        use_cookies = bool(cookies_path)
+        label = "cookies+tv" if use_cookies else "android"
+        logger.info(f"[YouTube] yt-dlp yuklash: {label}")
 
-    for strat_label, fmt in yt_strategies:
-        # Avval proxiesz, keyin proxy bilan
-        for use_proxy in [False, True]:
-            if use_proxy and (not proxy or proxy_broken):
-                continue
+        opts = _build_download_opts(output_path, quality, audio_only, use_cookies, "best")
 
-            try:
-                use_cookies = bool(cookies_path)
-                proxy_label = "proxy" if use_proxy else "proxiesz"
-                label = f"{strat_label} ({'cookies' if use_cookies else 'no-cookies'}, {proxy_label})"
-                logger.info(f"[YouTube] yt-dlp yuklash: {label}")
+        if use_cookies:
+            opts["extractor_args"] = {"youtube": {"player_client": ["tv_embedded"]}}
+        else:
+            opts["extractor_args"] = {"youtube": {"player_client": ["android"]}}
 
-                opts = _build_download_opts(output_path, quality, audio_only, use_cookies, fmt)
+        opts["geo_bypass"] = "US"
+        opts["geo_bypass_country"] = "US"
+        opts["socket_timeout"] = 10
 
-                if use_cookies:
-                    opts["extractor_args"] = {"youtube": {"player_client": ["tv_embedded"]}}
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+
+            if info is None:
+                logger.warning("[YouTube] yt-dlp info qaytarmadi")
+                return None
+
+            file_path = ydl.prepare_filename(info)
+
+            if audio_only and config.download.ffmpeg_available:
+                base_path = os.path.splitext(file_path)[0]
+                mp3_path = base_path + ".mp3"
+                if os.path.exists(mp3_path):
+                    file_path = mp3_path
+
+            if not os.path.exists(file_path):
+                files = os.listdir(output_path)
+                if files:
+                    file_path = os.path.join(output_path, files[0])
                 else:
-                    opts["extractor_args"] = {"youtube": {"player_client": ["android"]}}
-
-                if use_proxy:
-                    opts["proxy"] = proxy
-                else:
-                    # Proxy ni olib tashlash (agar avval qo'shilgan bo'lsa)
-                    opts.pop("proxy", None)
-
-                opts["geo_bypass"] = "US"
-                opts["geo_bypass_country"] = "US"
-
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    info = ydl.extract_info(url, download=True)
-
-                    if info is None:
-                        logger.warning("[YouTube] yt-dlp info qaytarmadi")
-                        continue
-
-                    file_path = ydl.prepare_filename(info)
-
-                    if audio_only and config.download.ffmpeg_available:
-                        base_path = os.path.splitext(file_path)[0]
-                        mp3_path = base_path + ".mp3"
-                        if os.path.exists(mp3_path):
-                            file_path = mp3_path
-
-                    if not os.path.exists(file_path):
-                        files = os.listdir(output_path)
-                        if files:
-                            file_path = os.path.join(output_path, files[0])
-                        else:
-                            logger.warning("[YouTube] yt-dlp fayl yaratmadi")
-                            continue
-
-                    # Fayl hajmini tekshirish (max_filesize olib tashlangan)
-                    file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-                    if file_size_mb > config.download.max_file_size_mb:
-                        logger.warning(f"[YouTube] Fayl juda katta: {file_size_mb:.1f}MB")
-                        try:
-                            os.remove(file_path)
-                        except OSError:
-                            pass
-                        return None
-
-                    logger.info(f"[YouTube] yt-dlp yuklash MUVOFAQIYATLI: {label}")
-                    return file_path, info
-
-            except AttributeError as e:
-                # yt-dlp.utils.MaxDownloadsExceeded yo'q - bu ma'lum xato
-                if "MaxDownloads" in str(e):
-                    logger.warning("[YouTube] Fayl hajmi cheklovdan oshdi (yt-dlp ichki xatosi)")
+                    logger.warning("[YouTube] yt-dlp fayl yaratmadi")
                     return None
-                logger.warning(f"[YouTube] yt-dlp AttributeError: {str(e)[:100]}")
-            except Exception as e:
-                err_str = str(e)
-                if "MaxDownloads" in str(type(e).__name__) or "MaxDownloads" in err_str:
-                    logger.warning("[YouTube] Fayl hajmi cheklovdan oshdi")
-                    return None
-                # Proxy xatosi - proxyni buzilgan deb belgilash
-                if use_proxy and ("ProxyError" in err_str or "Errno 9" in err_str
-                                   or "Connection refused" in err_str
-                                   or "Errno 111" in err_str):
-                    logger.warning(f"[YouTube] Proxy ishlamadi, proxiesz o'tilmoqda")
-                    proxy_broken = True
-                    continue
-                if not use_proxy:
-                    # Proxiesz ham ishlamasa - keyingi strategiya
-                    logger.debug(f"[YouTube] yt-dlp xato ({strat_label}, proxiesz): {err_str[:80]}")
-                    continue
-                logger.warning(f"[YouTube] yt-dlp xato ({strat_label}): {err_str[:100]}")
+
+            # Fayl hajmini tekshirish
+            file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+            if file_size_mb > config.download.max_file_size_mb:
+                logger.warning(f"[YouTube] Fayl juda katta: {file_size_mb:.1f}MB")
+                try:
+                    os.remove(file_path)
+                except OSError:
+                    pass
+                return None
+
+            logger.info(f"[YouTube] yt-dlp yuklash MUVOFAQIYATLI: {label}")
+            return file_path, info
+
+    except AttributeError as e:
+        if "MaxDownloads" in str(e):
+            logger.warning("[YouTube] Fayl hajmi cheklovdan oshdi")
+            return None
+        logger.warning(f"[YouTube] yt-dlp AttributeError: {str(e)[:100]}")
+    except Exception as e:
+        err_str = str(e)
+        if "MaxDownloads" in str(type(e).__name__) or "MaxDownloads" in err_str:
+            logger.warning("[YouTube] Fayl hajmi cheklovdan oshdi")
+            return None
+        logger.warning(f"[YouTube] yt-dlp xato: {err_str[:100]}")
 
     logger.error("[YouTube] Barcha yuklash usullari muvaffaqiyatsiz")
     return None

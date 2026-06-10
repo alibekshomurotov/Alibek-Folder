@@ -61,8 +61,8 @@ HEADERS = {
     "Accept": "application/json",
 }
 
-_FAST_INVIDIOUS = INVIDIOUS_INSTANCES[:8]
-_FAST_PIPED = PIPED_INSTANCES[:4]
+_FAST_INVIDIOUS = INVIDIOUS_INSTANCES[:4]  # 4 ta (8 juda sekin)
+_FAST_PIPED = PIPED_INSTANCES[:3]  # 3 ta
 
 
 def _is_proxy_available() -> bool:
@@ -724,4 +724,3 @@ def _convert_piped(data: Dict, video_id: str) -> Dict[str, Any]:
         })
 
     return info
-    
