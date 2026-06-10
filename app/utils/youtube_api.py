@@ -15,11 +15,12 @@ COBALT_API_KEY = os.getenv("COBALT_API_KEY", "")
 # Proxy sozlamalari
 YOUTUBE_PROXY = os.getenv("YOUTUBE_PROXY", "") or os.getenv("HTTP_PROXY", "") or os.getenv("HTTPS_PROXY", "")
 
+# Proxy holati - agar proxy xato bersa, keyingi so'rovlarda ishlatmaymiz
+_proxy_broken = False
+
 # Invidious instances - 2026 yil iyunda yangilangan
-# Ba'zi instancalar datacenter IP lardan bloklaydi,
-# shuning uchun ko'proq alternative serverlar kerak
 INVIDIOUS_INSTANCES = [
-    # Eng ishonchli (ko'p ishlaydi)
+    # Eng ishonchli
     "https://inv.nadeko.net",
     "https://invidious.nerdvpn.de",
     "https://iv.datura.network",
@@ -33,14 +34,14 @@ INVIDIOUS_INSTANCES = [
     # Qo'shimcha instancelar
     "https://inv.in.projectsegfau.lt",
     "https://invidious.projectsegfau.lt",
-    "https://inv.tux.pizza",
     "https://invidious.fdn.fr",
     "https://iv.ggtyler.dev",
-    "https://invidious.privacyredirect.com",
     "https://inv.oikei.net",
     "https://yewtu.be",
     "https://invidious.privacy.de",
-    "https://vid.puffyan.us",
+    "https://invidious.lunar.icu",
+    "https://inv.bp.projectsegfau.lt",
+    "https://invidious.fdn.fr",
 ]
 
 # Piped instances - 2026 yil iyunda yangilangan
@@ -60,10 +61,23 @@ HEADERS = {
     "Accept": "application/json",
 }
 
+_FAST_INVIDIOUS = INVIDIOUS_INSTANCES[:8]
+_FAST_PIPED = PIPED_INSTANCES[:4]
+
+
+def _is_proxy_available() -> bool:
+    """Proxy ishlayaptimi tekshirish."""
+    global _proxy_broken
+    if not YOUTUBE_PROXY:
+        return False
+    if _proxy_broken:
+        return False
+    return True
+
 
 def _get_proxy_connector() -> Optional[aiohttp.TCPConnector]:
     """Proxy uchun aiohttp connector yaratish."""
-    if not YOUTUBE_PROXY:
+    if not _is_proxy_available():
         return None
 
     proxy_type = YOUTUBE_PROXY.lower()
@@ -72,29 +86,30 @@ def _get_proxy_connector() -> Optional[aiohttp.TCPConnector]:
     if proxy_type.startswith("socks5"):
         try:
             from aiohttp_socks import ProxyConnector
-            logger.info(f"[Proxy] SOCKS5 ishlatilmoqda: {YOUTUBE_PROXY.split('@')[-1] if '@' in YOUTUBE_PROXY else YOUTUBE_PROXY}")
             return ProxyConnector.from_url(YOUTUBE_PROXY)
         except ImportError:
-            logger.warning("[Proxy] aiohttp-socks o'rnatilmagan! pip install aiohttp-socks")
+            logger.warning("[Proxy] aiohttp-socks o'rnatilmagan!")
             return None
         except Exception as e:
             logger.warning(f"[Proxy] SOCKS5 connector xatosi: {e}")
             return None
-
-    # HTTP/HTTPS proxy
-    if proxy_type.startswith("http"):
-        # HTTP proxy uchun maxsus connector kerak emas
-        # aiohttp session ga proxy parametri uzatiladi
-        return None
 
     return None
 
 
 def _get_proxy_url() -> Optional[str]:
     """aiohttp uchun proxy URL qaytarish."""
-    if YOUTUBE_PROXY:
+    if _is_proxy_available():
         return YOUTUBE_PROXY
     return None
+
+
+def _mark_proxy_broken():
+    """Proxy buzilgan deb belgilash."""
+    global _proxy_broken
+    if not _proxy_broken:
+        _proxy_broken = True
+        logger.warning(f"[Proxy] Proxy ishlamadi, endi proxiesz ishlatamiz!")
 
 
 def _extract_video_id(url: str) -> Optional[str]:
@@ -132,6 +147,8 @@ async def _try_cobalt(url: str, quality: str = "720", audio_only: bool = False) 
 
     try:
         connector = _get_proxy_connector()
+        proxy = _get_proxy_url() if not connector else None
+
         async with aiohttp.ClientSession(connector=connector) as session:
             cobalt_quality = quality.replace("p", "")
             if audio_only:
@@ -152,8 +169,6 @@ async def _try_cobalt(url: str, quality: str = "720", audio_only: bool = False) 
 
             if COBALT_API_KEY:
                 headers["Authorization"] = f"Bearer {COBALT_API_KEY}"
-
-            proxy = _get_proxy_url() if not connector else None
 
             logger.info(f"[Cobalt] {api_url} ga so'rov yuborilmoqda...")
             async with session.post(
@@ -203,6 +218,9 @@ async def _try_cobalt(url: str, quality: str = "720", audio_only: bool = False) 
                 else:
                     logger.warning(f"[Cobalt] {api_url}: URL topilmadi")
 
+    except aiohttp.ClientConnectorError as e:
+        logger.warning(f"[Cobalt] Proxy ulanish xatosi: {str(e)[:80]}")
+        _mark_proxy_broken()
     except Exception as e:
         logger.warning(f"[Cobalt] {api_url}: Xato - {str(e)[:100]}")
 
@@ -210,26 +228,26 @@ async def _try_cobalt(url: str, quality: str = "720", audio_only: bool = False) 
 
 
 # ============================================================
-# INVIDIOUS API - proxy bilan
+# INVIDIOUS API - avval proxiesz, keyin proxy bilan
 # ============================================================
 
-_FAST_INVIDIOUS = INVIDIOUS_INSTANCES[:6]  # 6 ta tezkor Invidious
-_FAST_PIPED = PIPED_INSTANCES[:4]  # 4 ta tezkor Piped
-
-
 async def _try_invidious(video_id: str, fast_only: bool = False) -> Optional[Dict[str, Any]]:
-    """Invidious API orqali video ma'lumotlarini olish (proxy bilan)."""
-    instances = _FAST_INVIDIOUS if fast_only else INVIDIOUS_INSTANCES
-    connector = _get_proxy_connector()
-    proxy = _get_proxy_url() if not connector else None
+    """Invidious API orqali video ma'lumotlarini olish.
 
+    MUHIM: Invidious - bu YouTube alternative frontend.
+    U YouTube emas, shuning uchun datacenter IP dan ham ishlashi kerak.
+    Avval PROXIESZ sinaymiz (tezroq), keyin proxy bilan.
+    """
+    instances = _FAST_INVIDIOUS if fast_only else INVIDIOUS_INSTANCES
+
+    # 1-urinish: Proxiesz (tezroq, Invidious o'zi proxy emas)
     for instance in instances:
         try:
-            async with aiohttp.ClientSession(connector=connector, headers=HEADERS) as session:
+            async with aiohttp.ClientSession(headers=HEADERS) as session:
                 url = f"{instance}/api/v1/videos/{video_id}"
-                async with session.get(url, proxy=proxy, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
                     if resp.status != 200:
-                        logger.info(f"[Invidious] {instance}: HTTP {resp.status}")
+                        logger.debug(f"[Invidious] {instance}: HTTP {resp.status} (proxiesz)")
                         continue
 
                     data = await resp.json()
@@ -241,7 +259,7 @@ async def _try_invidious(video_id: str, fast_only: bool = False) -> Optional[Dic
                         continue
 
                     logger.info(
-                        f"[Invidious] {instance}: MUVOFAQIYATLI - "
+                        f"[Invidious] {instance}: MUVOFAQIYATLI (proxiesz) - "
                         f"Video: {len(video_formats)}, Audio: {len(audio_formats)}"
                     )
                     return {
@@ -255,26 +273,59 @@ async def _try_invidious(video_id: str, fast_only: bool = False) -> Optional[Dic
             logger.debug(f"[Invidious] {instance}: {str(e)[:60]}")
             continue
 
+    # 2-urinish: Proxy bilan (faqat proxy mavjud bo'lsa)
+    if _is_proxy_available():
+        connector = _get_proxy_connector()
+        proxy = _get_proxy_url() if not connector else None
+
+        for instance in instances[:3]:  # Faqat 3 tasi bilan sinash
+            try:
+                async with aiohttp.ClientSession(connector=connector, headers=HEADERS) as session:
+                    url = f"{instance}/api/v1/videos/{video_id}"
+                    async with session.get(url, proxy=proxy, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                        if resp.status != 200:
+                            continue
+
+                        data = await resp.json()
+                        formats = data.get("formatStreams", []) + data.get("adaptiveFormats", [])
+                        if formats:
+                            logger.info(f"[Invidious] {instance}: MUVOFAQIYATLI (proxy bilan)")
+                            return {
+                                "source": "invidious",
+                                "instance": instance,
+                                "data": data,
+                                "video_id": video_id,
+                            }
+
+            except aiohttp.ClientConnectorError:
+                _mark_proxy_broken()
+                break
+            except Exception:
+                continue
+
     return None
 
 
 # ============================================================
-# PIPED API - proxy bilan
+# PIPED API - avval proxiesz, keyin proxy bilan
 # ============================================================
 
 async def _try_piped(video_id: str, fast_only: bool = False) -> Optional[Dict[str, Any]]:
-    """Piped API orqali video ma'lumotlarini olish (proxy bilan)."""
-    instances = _FAST_PIPED if fast_only else PIPED_INSTANCES
-    connector = _get_proxy_connector()
-    proxy = _get_proxy_url() if not connector else None
+    """Piped API orqali video ma'lumotlarini olish.
 
+    MUHIM: Piped ham YouTube alternative frontend.
+    Avval PROXIESZ sinaymiz, keyin proxy bilan.
+    """
+    instances = _FAST_PIPED if fast_only else PIPED_INSTANCES
+
+    # 1-urinish: Proxiesz
     for instance in instances:
         try:
-            async with aiohttp.ClientSession(connector=connector, headers=HEADERS) as session:
+            async with aiohttp.ClientSession(headers=HEADERS) as session:
                 url = f"{instance}/streams/{video_id}"
-                async with session.get(url, proxy=proxy, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
                     if resp.status != 200:
-                        logger.info(f"[Piped] {instance}: HTTP {resp.status}")
+                        logger.debug(f"[Piped] {instance}: HTTP {resp.status} (proxiesz)")
                         continue
 
                     data = await resp.json()
@@ -285,7 +336,7 @@ async def _try_piped(video_id: str, fast_only: bool = False) -> Optional[Dict[st
                         continue
 
                     logger.info(
-                        f"[Piped] {instance}: MUVOFAQIYATLI - "
+                        f"[Piped] {instance}: MUVOFAQIYATLI (proxiesz) - "
                         f"Video: {len(video_streams)}, Audio: {len(audio_streams)}"
                     )
                     return {
@@ -298,6 +349,38 @@ async def _try_piped(video_id: str, fast_only: bool = False) -> Optional[Dict[st
         except Exception as e:
             logger.debug(f"[Piped] {instance}: {str(e)[:60]}")
             continue
+
+    # 2-urinish: Proxy bilan
+    if _is_proxy_available():
+        connector = _get_proxy_connector()
+        proxy = _get_proxy_url() if not connector else None
+
+        for instance in instances[:2]:
+            try:
+                async with aiohttp.ClientSession(connector=connector, headers=HEADERS) as session:
+                    url = f"{instance}/streams/{video_id}"
+                    async with session.get(url, proxy=proxy, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                        if resp.status != 200:
+                            continue
+
+                        data = await resp.json()
+                        video_streams = data.get("videoStreams", [])
+                        audio_streams = data.get("audioStreams", [])
+
+                        if video_streams or audio_streams:
+                            logger.info(f"[Piped] {instance}: MUVOFAQIYATLI (proxy bilan)")
+                            return {
+                                "source": "piped",
+                                "instance": instance,
+                                "data": data,
+                                "video_id": video_id,
+                            }
+
+            except aiohttp.ClientConnectorError:
+                _mark_proxy_broken()
+                break
+            except Exception:
+                continue
 
     return None
 
@@ -394,39 +477,60 @@ async def _download_from_url(url: str, video_id: str, audio_only: bool,
         from app.config import config as app_config
         max_size = app_config.download.max_file_size_mb * 1024 * 1024
 
-        connector = _get_proxy_connector()
-        proxy = _get_proxy_url() if not connector else None
+        # Avval proxiesz, keyin proxy bilan
+        for use_proxy in [False, True]:
+            if use_proxy and not _is_proxy_available():
+                continue
 
-        async with aiohttp.ClientSession(connector=connector, headers=HEADERS) as session:
-            async with session.get(url, proxy=proxy, timeout=aiohttp.ClientTimeout(total=120)) as resp:
-                if resp.status != 200:
-                    logger.error(f"[API] Yuklash HTTP xatosi: {resp.status}")
-                    return None
+            connector = _get_proxy_connector() if use_proxy else None
+            proxy = _get_proxy_url() if use_proxy and not connector else None
 
-                total_size = 0
-                with open(file_path, "wb") as f:
-                    async for chunk in resp.content.iter_chunked(8192):
-                        total_size += len(chunk)
-                        if total_size > max_size:
-                            logger.error(f"[API] Fayl juda katta: {total_size / 1024 / 1024:.1f}MB")
-                            try:
-                                os.remove(file_path)
-                            except OSError:
-                                pass
+            try:
+                async with aiohttp.ClientSession(connector=connector, headers=HEADERS) as session:
+                    async with session.get(url, proxy=proxy, timeout=aiohttp.ClientTimeout(total=120)) as resp:
+                        if resp.status != 200:
+                            if use_proxy:
+                                continue
+                            logger.error(f"[API] Yuklash HTTP xatosi: {resp.status}")
                             return None
-                        f.write(chunk)
 
-                if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
-                    logger.error("[API] Yuklangan fayl bo'sh")
-                    return None
+                        total_size = 0
+                        with open(file_path, "wb") as f:
+                            async for chunk in resp.content.iter_chunked(8192):
+                                total_size += len(chunk)
+                                if total_size > max_size:
+                                    logger.error(f"[API] Fayl juda katta: {total_size / 1024 / 1024:.1f}MB")
+                                    try:
+                                        os.remove(file_path)
+                                    except OSError:
+                                        pass
+                                    return None
+                                f.write(chunk)
 
-                file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-                logger.info(f"[API] Yuklash MUVOFAQIYATLI: {file_size_mb:.1f}MB")
-                return file_path
+                        if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+                            logger.error("[API] Yuklangan fayl bo'sh")
+                            return None
+
+                        file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+                        logger.info(f"[API] Yuklash MUVOFAQIYATLI: {file_size_mb:.1f}MB")
+                        return file_path
+
+            except aiohttp.ClientConnectorError:
+                if use_proxy:
+                    _mark_proxy_broken()
+                    continue
+                logger.error(f"[API] Ulanish xatosi")
+                return None
+            except Exception as e:
+                if use_proxy:
+                    continue
+                logger.error(f"[API] Yuklash xatosi: {e}")
+                return None
 
     except Exception as e:
         logger.error(f"[API] Yuklash xatosi: {e}")
-        return None
+
+    return None
 
 
 def _make_basic_info(url: str, video_id: str, audio_only: bool) -> Dict[str, Any]:
@@ -620,3 +724,4 @@ def _convert_piped(data: Dict, video_id: str) -> Dict[str, Any]:
         })
 
     return info
+    
