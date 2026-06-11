@@ -1,5 +1,3 @@
-"""Video Handler - Video download processing"""
-
 import asyncio
 import logging
 import os
@@ -22,6 +20,7 @@ from app.keyboards.inline import quality_select_kb, back_to_main_kb
 from app.utils.downloader import (
     detect_platform, is_video_url,
     format_file_size, cleanup_file,
+    LoginRequiredError,
 )
 from app.utils.formatter import (
     format_video_info, format_video_caption, format_loading_step,
@@ -101,6 +100,40 @@ def _ensure_mp4(file_path: str) -> str:
         if not os.path.exists(new_path):
             os.rename(file_path, new_path)
         return new_path
+
+
+def _format_story_error(missing_cookies: list = None) -> str:
+    """Instagram story xato xabarini tayyorlash.
+
+    Yetishmayotgan cookie'larga qarab aniq xabar ko'rsatadi.
+    """
+    base = "❌ <b>Instagram Story yuklab bo'lmadi</b>\n\n"
+
+    if missing_cookies:
+        missing_str = ", ".join(f"<code>{c}</code>" for c in missing_cookies)
+        base += (
+            f"🔍 <b>Sabab:</b> Cookie faylda quyidagi cookie'lar yetishmayapti:\n"
+            f"{missing_str}\n\n"
+        )
+    else:
+        base += (
+            "🔍 <b>Sabab:</b> Story'larni ko'rish uchun Instagram akkaunti kerak.\n\n"
+        )
+
+    base += (
+        "💡 <b>Yechim:</b>\n"
+        "1. Chrome brauzerida Instagram'ga kiring\n"
+        "2. \"Get cookies.txt LOCALLY\" kengaytmasini o'rnating\n"
+        "3. Instagram sahifasida kengaytmani bosing → Export\n"
+        "4. Cookie faylini administratorga yuboring\n\n"
+        "⚠️ <b>Muhim eslatmalar:</b>\n"
+        "• Cookie faylda <b>instagram.com</b> domaini bo'lishi shart\n"
+        "• <code>sessionid</code>, <code>ds_user_id</code>, <code>csrftoken</code> — bu 3 ta cookie KRITIK\n"
+        "• Cookie'lar muntazam yangilanishi kerak (har 1-2 haftada)\n"
+        "• Instagram'ga kirganingizda \"Remember me\" ni bosing\n\n"
+        "📸 Instagram Reels va Post'lar ishlaydi!"
+    )
+    return base
 
 
 @router.message(StateFilter(None), ~F.text.startswith("/"))
@@ -185,52 +218,23 @@ async def handle_video_link(message: Message, state: FSMContext):
             )
             return
 
-        # Cancel animation
+    except LoginRequiredError as e:
         animation_task.cancel()
-
-        # Cache video info
-        video_id = result["info"].get("id", str(hash(url)))
-        _video_cache[video_id] = {
-            "url": url,
-            "info": result["info"],
-            "platform": result["platform"],
-            "cached_at": time.time(),
-        }
-
-        # Clean old cache entries (TTL + max size)
-        now = time.time()
-        expired = [k for k, v in _video_cache.items() if now - v.get("cached_at", 0) > _CACHE_TTL]
-        for k in expired:
-            del _video_cache[k]
-
-        if len(_video_cache) > 100:
-            oldest = sorted(_video_cache.items(), key=lambda x: x[1].get("cached_at", 0))[:50]
-            for k, _ in oldest:
-                del _video_cache[k]
-
-        # Show video info with quality selection
-        text = format_video_info(result["info"], result["platform"])
-        kb = quality_select_kb(video_id, result["available_qualities"])
-
-        # Try to send thumbnail
-        thumbnail_url = result["info"].get("thumbnail")
-        if thumbnail_url:
-            try:
-                await loading_msg.delete()
-                await message.answer_photo(
-                    photo=thumbnail_url,
-                    caption=text,
-                    reply_markup=kb,
-                    parse_mode="HTML",
-                )
-            except Exception:
-                await loading_msg.edit_text(
-                    text, reply_markup=kb, parse_mode="HTML"
-                )
-        else:
+        # Instagram stories uchun maxsus xato xabari
+        if e.platform == "instagram" and e.content_type == "story":
             await loading_msg.edit_text(
-                text, reply_markup=kb, parse_mode="HTML"
+                _format_story_error(e.missing_cookies),
+                reply_markup=back_to_main_kb(),
+                parse_mode="HTML",
             )
+            return
+
+        await loading_msg.edit_text(
+            format_error("download_error"),
+            reply_markup=back_to_main_kb(),
+            parse_mode="HTML",
+        )
+        return
 
     except Exception as e:
         animation_task.cancel()
@@ -243,6 +247,54 @@ async def handle_video_link(message: Message, state: FSMContext):
             )
         except Exception:
             pass
+        return
+
+    # Cancel animation - success path
+    animation_task.cancel()
+
+    # Cache video info
+    video_id = result["info"].get("id", str(hash(url)))
+    _video_cache[video_id] = {
+        "url": url,
+        "info": result["info"],
+        "platform": result["platform"],
+        "cached_at": time.time(),
+    }
+
+    # Clean old cache entries (TTL + max size)
+    now = time.time()
+    expired = [k for k, v in _video_cache.items() if now - v.get("cached_at", 0) > _CACHE_TTL]
+    for k in expired:
+        del _video_cache[k]
+
+    if len(_video_cache) > 100:
+        oldest = sorted(_video_cache.items(), key=lambda x: x[1].get("cached_at", 0))[:50]
+        for k, _ in oldest:
+            del _video_cache[k]
+
+    # Show video info with quality selection
+    text = format_video_info(result["info"], result["platform"])
+    kb = quality_select_kb(video_id, result["available_qualities"])
+
+    # Try to send thumbnail
+    thumbnail_url = result["info"].get("thumbnail")
+    if thumbnail_url:
+        try:
+            await loading_msg.delete()
+            await message.answer_photo(
+                photo=thumbnail_url,
+                caption=text,
+                reply_markup=kb,
+                parse_mode="HTML",
+            )
+        except Exception:
+            await loading_msg.edit_text(
+                text, reply_markup=kb, parse_mode="HTML"
+            )
+    else:
+        await loading_msg.edit_text(
+            text, reply_markup=kb, parse_mode="HTML"
+        )
 
 
 @router.callback_query(F.data.startswith("quality_"))
@@ -332,6 +384,15 @@ async def handle_quality_select(callback: CallbackQuery, state: FSMContext):
                 )
                 return
 
+            # Instagram stories uchun maxsus xato
+            if platform == "instagram" and "/stories/" in url.lower():
+                await loading_msg.edit_text(
+                    _format_story_error(),
+                    reply_markup=back_to_main_kb(),
+                    parse_mode="HTML",
+                )
+                return
+
             await loading_msg.edit_text(
                 format_error("download_error"),
                 reply_markup=back_to_main_kb(),
@@ -339,31 +400,21 @@ async def handle_quality_select(callback: CallbackQuery, state: FSMContext):
             )
             return
 
-        file_path = result["file_path"]
-        file_size_mb = result["file_size_mb"]
-
-        # Send the file
-        try:
-            if audio_only:
-                # Audio faylni yuborish
-                await _send_audio(callback, file_path, result["info"])
-            else:
-                # Video faylni yuborish
-                await _send_video(callback, file_path, result["info"], quality, file_size_mb)
-
-            await loading_msg.delete()
-
-        except Exception as e:
-            logger.error(f"Error sending file: {e}")
+    except LoginRequiredError as e:
+        animation_task.cancel()
+        if e.platform == "instagram" and e.content_type == "story":
             await loading_msg.edit_text(
-                format_error("server_error"),
+                _format_story_error(e.missing_cookies),
                 reply_markup=back_to_main_kb(),
                 parse_mode="HTML",
             )
-        finally:
-            # Cleanup file
-            cleanup_file(file_path)
-
+            return
+        await loading_msg.edit_text(
+            format_error("download_error"),
+            reply_markup=back_to_main_kb(),
+            parse_mode="HTML",
+        )
+        return
     except Exception as e:
         animation_task.cancel()
         logger.error(f"Error downloading: {e}")
@@ -375,6 +426,32 @@ async def handle_quality_select(callback: CallbackQuery, state: FSMContext):
             )
         except Exception:
             pass
+        return
+
+    file_path = result["file_path"]
+    file_size_mb = result["file_size_mb"]
+
+    # Send the file
+    try:
+        if audio_only:
+            # Audio faylni yuborish
+            await _send_audio(callback, file_path, result["info"])
+        else:
+            # Video faylni yuborish
+            await _send_video(callback, file_path, result["info"], quality, file_size_mb)
+
+        await loading_msg.delete()
+
+    except Exception as e:
+        logger.error(f"Error sending file: {e}")
+        await loading_msg.edit_text(
+            format_error("server_error"),
+            reply_markup=back_to_main_kb(),
+            parse_mode="HTML",
+        )
+    finally:
+        # Cleanup file
+        cleanup_file(file_path)
 
 
 async def _send_video(callback: CallbackQuery, file_path: str, info: dict,

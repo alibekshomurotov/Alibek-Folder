@@ -30,7 +30,7 @@ async def start_health_server():
 
     async def debug_cookies_handler(request):
         """Debug endpoint to check cookies and yt-dlp status"""
-        from app.utils.downloader import _find_cookies_file
+        from app.utils.downloader import _find_cookies_file, _validate_instagram_cookies
         import yt_dlp as _ydl
 
         path = _find_cookies_file()
@@ -41,7 +41,7 @@ async def start_health_server():
 
         if path:
             try:
-                with open(path, "r") as f:
+                with open(path, "r", encoding="utf-8", errors="ignore") as f:
                     lines = f.readlines()
                 yt_cookies = [l for l in lines if "youtube.com" in l.lower() and not l.startswith("#")]
                 ig_cookies = [l for l in lines if "instagram.com" in l.lower() and not l.startswith("#")]
@@ -50,13 +50,21 @@ async def start_health_server():
                 found_critical = [c for c in critical if c in cookie_text]
                 missing_critical = [c for c in critical if c not in cookie_text]
 
+                # Instagram cookie validation
+                ig_validation = _validate_instagram_cookies(path)
+
                 result.update({
                     "status": "cookies_found",
                     "total_lines": len(lines),
                     "youtube_cookies": len(yt_cookies),
                     "instagram_cookies": len(ig_cookies),
-                    "found_critical": found_critical,
-                    "missing_critical": missing_critical,
+                    "found_critical_yt": found_critical,
+                    "missing_critical_yt": missing_critical,
+                    "instagram_story_ready": ig_validation["valid"],
+                    "instagram_missing_cookies": ig_validation["missing"],
+                    "instagram_found_critical": ig_validation["found_critical"],
+                    "instagram_found_useful": ig_validation["found_useful"],
+                    "instagram_total_cookies": ig_validation["total_ig_cookies"],
                 })
             except Exception as e:
                 result.update({"status": "error", "error": str(e)})

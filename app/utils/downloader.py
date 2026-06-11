@@ -1,9 +1,10 @@
 import os
 import logging
+import re
 import shutil
 import tempfile
 import time
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, List
 from urllib.parse import urlparse
 
 import yt_dlp
@@ -60,6 +61,83 @@ def _find_cookies_file() -> Optional[str]:
     return None
 
 
+def _parse_cookies(cookies_path: str) -> Dict[str, List[Dict[str, str]]]:
+    """cookies.txt faylini o'qib, domen bo'yicha cookie'larni qaytarish.
+
+    Returns:
+        {"instagram.com": [{"name": "sessionid", "value": "...", ...}], ...}
+    """
+    result = {}
+    try:
+        with open(cookies_path, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+        for line in lines:
+            if line.startswith("#") or not line.strip():
+                continue
+            parts = line.strip().split("\t")
+            if len(parts) < 7:
+                continue
+            domain = parts[0].lower()
+            name = parts[5].strip()
+            value = parts[6].strip()
+            if not name or not value:
+                continue
+            if domain not in result:
+                result[domain] = []
+            result[domain].append({
+                "name": name,
+                "value": value,
+                "domain": domain,
+                "path": parts[2] if len(parts) > 2 else "/",
+            })
+    except Exception as e:
+        logger.error(f"[COOKIES] Parse xatosi: {e}")
+    return result
+
+
+def _validate_instagram_cookies(cookies_path: str) -> Dict[str, Any]:
+    """Instagram cookie'larini tekshirish - story uchun muhim cookie'lar borligini tasdiqlash.
+
+    Returns:
+        {"valid": bool, "missing": [...], "found": [...], "total_ig_cookies": int}
+    """
+    cookies_by_domain = _parse_cookies(cookies_path)
+
+    # Barcha instagram.com subdomainlarini birlashtirish
+    ig_cookies = {}
+    for domain, cookies in cookies_by_domain.items():
+        if "instagram.com" in domain:
+            for c in cookies:
+                ig_cookies[c["name"]] = c["value"]
+
+    # Story uchun KRITIK cookie'lar
+    critical_cookies = ["sessionid", "ds_user_id", "csrftoken"]
+    # Foydali qo'shimcha cookie'lar
+    useful_cookies = ["ig_did", "mid", "ig_nrcb", "rur", "shbid"]
+
+    found_critical = [c for c in critical_cookies if c in ig_cookies]
+    missing_critical = [c for c in critical_cookies if c not in ig_cookies]
+    found_useful = [c for c in useful_cookies if c in ig_cookies]
+
+    is_valid = len(missing_critical) == 0
+
+    result = {
+        "valid": is_valid,
+        "missing": missing_critical,
+        "found_critical": found_critical,
+        "found_useful": found_useful,
+        "total_ig_cookies": len(ig_cookies),
+        "ig_cookies": ig_cookies,  # API fallback uchun kerak
+    }
+
+    if is_valid:
+        logger.info(f"[IG-COOKIES] Cookie'lar YAXSHI! Kritik: {found_critical}, Qo'shimcha: {found_useful}, Jami: {len(ig_cookies)}")
+    else:
+        logger.error(f"[IG-COOKIES] YETISHMAYAPTI: {missing_critical}! Bor: {found_critical}, Jami: {len(ig_cookies)}")
+
+    return result
+
+
 def log_cookies_status() -> None:
     """Ishga tushishda cookie holatini yozish"""
     logger.info(f"[yt-dlp] Versiya: {_yt_dlp_version}")
@@ -80,6 +158,15 @@ def log_cookies_status() -> None:
                 logger.info(f"[COOKIES] Muhim topildi: {found}")
             if missing:
                 logger.warning(f"[COOKIES] Muhim YO'Q: {missing}")
+
+            # Instagram cookie'larini tekshirish
+            ig_validation = _validate_instagram_cookies(path)
+            if not ig_validation["valid"]:
+                logger.warning(
+                    f"[COOKIES] Instagram Story uchun cookie'lar YETARLI EMAS! "
+                    f"Yetishmayotgan: {ig_validation['missing']}. "
+                    f"Cookie'larni qayta eksport qiling va Instagram'ga kirganingizni tekshiring."
+                )
 
             now = time.time()
             expired = sum(1 for l in lines if not l.startswith("#") and l.strip()
@@ -165,10 +252,6 @@ def _build_download_opts(output_path: str, quality: str = "720",
     opts["format"] = fmt
     opts["outtmpl"] = os.path.join(output_path, "%(id)s.%(ext)s")
     opts["extract_flat"] = False
-    # DIQQAT: max_filesize OLIB TASHLANDI!
-    # yt-dlp ichida MaxDownloadsExceeded atributi yo'q,
-    # shu sababli AttributeError chiqardi.
-    # Fayl hajmini yuklagandan keyin tekshiramiz.
 
     if config.download.ffmpeg_available and "+" in fmt:
         opts["merge_output_format"] = "mp4"
@@ -204,6 +287,354 @@ def _has_video_audio(formats: list) -> bool:
 
 
 # ============================================================
+# INSTAGRAM: To'g'ridan-to'g'ri API orqali story yuklash
+# ============================================================
+
+async def _download_instagram_story_api(url: str, cookies_path: str) -> Optional[Tuple[str, Dict[str, Any]]]:
+    """Instagram story'ni to'g'ridan-to'g'ri API orqali yuklash.
+
+    yt-dlp ishlamaganda bu fallback sifatida ishlatiladi.
+    Instagram stories faqat autentifikatsiya qilingan foydalanuvchilarga ko'rinadi,
+    shuning uchun cookie'larda sessionid, ds_user_id, csrftoken bo'lishi shart.
+
+    Returns:
+        (file_path, info_dict) yoki None
+    """
+    import http.cookiejar
+    import aiohttp
+
+    # URL dan username va story ID ajratish
+    # Format: https://www.instagram.com/stories/USERNAME/STORY_ID/
+    # Yoki: https://www.instagram.com/stories/USERNAME/
+    story_match = re.search(r'/stories/([^/]+)(?:/(\d+))?/?', url)
+    if not story_match:
+        logger.error("[IG-API] URL dan username topilmadi")
+        return None
+
+    username = story_match.group(1)
+    story_id = story_match.group(2)  # Bo'lmasa None
+
+    logger.info(f"[IG-API] Story yuklanmoqda: username={username}, story_id={story_id}")
+
+    # Cookie'larni tekshirish
+    ig_validation = _validate_instagram_cookies(cookies_path)
+    if not ig_validation["valid"]:
+        logger.error(f"[IG-API] Cookie'lar yetarli emas! Yetishmayotgan: {ig_validation['missing']}")
+        return None
+
+    ig_cookies = ig_validation["ig_cookies"]
+    sessionid = ig_cookies.get("sessionid", "")
+    ds_user_id = ig_cookies.get("ds_user_id", "")
+    csrftoken = ig_cookies.get("csrftoken", "")
+
+    # Cookie string yaratish
+    cookie_str = "; ".join(f"{k}={v}" for k, v in ig_cookies.items())
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
+        "X-IG-App-ID": "936619743392459",
+        "X-CSRFToken": csrftoken,
+        "X-Instagram-AJAX": "1",
+        "X-Requested-With": "XMLHttpRequest",
+        "Referer": f"https://www.instagram.com/{username}/",
+        "Cookie": cookie_str,
+        "Accept": "application/json",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin",
+    }
+
+    async with aiohttp.ClientSession(headers=headers) as session:
+        # 1-qadam: Username dan user ID olish
+        try:
+            user_api_url = f"https://www.instagram.com/api/v1/users/web_profile_info/?username={username}"
+            async with session.get(user_api_url) as resp:
+                if resp.status != 200:
+                    logger.error(f"[IG-API] User ID olish xatosi: status={resp.status}")
+                    # 2-usul: sahifa orqali user ID olishga urinib ko'ramiz
+                    return await _download_instagram_story_page(url, cookies_path, ig_cookies, headers)
+
+                user_data = await resp.json()
+                user_id = user_data.get("data", {}).get("user", {}).get("id")
+                if not user_id:
+                    logger.error(f"[IG-API] User ID topilmadi: {user_data}")
+                    return await _download_instagram_story_page(url, cookies_path, ig_cookies, headers)
+
+        except Exception as e:
+            logger.error(f"[IG-API] User ID olish xatosi: {e}")
+            return await _download_instagram_story_page(url, cookies_path, ig_cookies, headers)
+
+        logger.info(f"[IG-API] User ID: {user_id}")
+
+        # 2-qadam: User story'larini olish
+        try:
+            story_api_url = f"https://www.instagram.com/api/v1/feed/user/{user_id}/story/"
+            async with session.get(story_api_url) as resp:
+                if resp.status != 200:
+                    logger.error(f"[IG-API] Story API xatosi: status={resp.status}")
+                    return await _download_instagram_story_page(url, cookies_path, ig_cookies, headers)
+
+                story_data = await resp.json()
+                items = story_data.get("items", [])
+
+                if not items:
+                    logger.error("[IG-API] Story topilmadi (bo'sh yoki faol emas)")
+                    return None
+
+        except Exception as e:
+            logger.error(f"[IG-API] Story API xatosi: {e}")
+            return await _download_instagram_story_page(url, cookies_path, ig_cookies, headers)
+
+        # 3-qadam: Kerakli story'ni topish
+        target_item = None
+
+        if story_id:
+            # Ma'lum bir story ID bo'yicha qidirish
+            for item in items:
+                item_id = str(item.get("id", ""))
+                # Instagram story ID formati: "12345678901234567_12345678901"
+                if item_id.startswith(story_id) or story_id in item_id:
+                    target_item = item
+                    break
+
+        if not target_item and items:
+            # Story ID topilmadi yoki berilmadi - oxirgi (eng yangi) story'ni olish
+            if story_id:
+                logger.warning(f"[IG-API] Story ID {story_id} topilmadi, oxirgi story olinmoqda")
+            target_item = items[-1]
+
+        if not target_item:
+            logger.error("[IG-API] Hech qanday story topilmadi")
+            return None
+
+        # 4-qadam: Story media URL olish va yuklab olish
+        return await _download_story_item(session, target_item, username)
+
+
+async def _download_instagram_story_page(url: str, cookies_path: str,
+                                          ig_cookies: Dict[str, str],
+                                          headers: Dict[str, str]) -> Optional[Tuple[str, Dict[str, Any]]]:
+    """Instagram story'ni sahifa orqali yuklash - 2-usul fallback.
+
+    API ishlamaganda, story sahifasini ochib, undan media URL'ni ajratib olamiz.
+    """
+    import aiohttp
+
+    logger.info("[IG-PAGE] Story sahifa orqali yuklash boshlandi")
+
+    # Story URL ni ochish
+    async with aiohttp.ClientSession(headers=headers) as session:
+        try:
+            async with session.get(url, allow_redirects=True) as resp:
+                if resp.status != 200:
+                    logger.error(f"[IG-PAGE] Sahifa ochish xatosi: status={resp.status}")
+                    return None
+
+                html = await resp.text()
+
+                # Sahifadan story ma'lumotlarini ajratib olish
+                # Instagram sahifasida "window._sharedData" yoki "requireLazy" ichida JSON bo'ladi
+                # Hozirgi versiyada: <script type="application/ld+json"> yoki window.__additionalDataLoaded
+
+                # Usul 1: video_url ni to'g'ridan-to'g'ridan qidirish
+                video_urls = re.findall(
+                    r'"video_url"\s*:\s*"([^"]+)"',
+                    html
+                )
+                if video_urls:
+                    video_url = video_urls[0].replace("\\u0026", "&")
+                    logger.info(f"[IG-PAGE] Video URL topildi!")
+                    return await _download_media_url(session, video_url, "story_video", "mp4")
+
+                # Usul 2: image URL qidirish
+                image_urls = re.findall(
+                    r'"display_url"\s*:\s*"([^"]+)"',
+                    html
+                )
+                if image_urls:
+                    image_url = image_urls[0].replace("\\u0026", "&")
+                    logger.info(f"[IG-PAGE] Image URL topildi!")
+                    return await _download_media_url(session, image_url, "story_image", "jpg")
+
+                # Usul 3: og:video meta tag
+                og_video = re.findall(
+                    r'<meta\s+property="og:video(?::secure_url)?"\s+content="([^"]+)"',
+                    html
+                )
+                if og_video:
+                    video_url = og_video[0].replace("&amp;", "&")
+                    logger.info(f"[IG-PAGE] OG Video URL topildi!")
+                    return await _download_media_url(session, video_url, "story_video", "mp4")
+
+                # Usul 4: CDN URL larni qidirish (story video uchun)
+                cdn_urls = re.findall(
+                    r'(https?://[^"]*fbcdn\.net[^"]*\.mp4[^"]*)',
+                    html
+                )
+                if cdn_urls:
+                    video_url = cdn_urls[0].replace("\\u0026", "&").replace("&amp;", "&")
+                    logger.info(f"[IG-PAGE] CDN Video URL topildi!")
+                    return await _download_media_url(session, video_url, "story_video", "mp4")
+
+                logger.error("[IG-PAGE] Sahifadan media URL topilmadi")
+                return None
+
+        except Exception as e:
+            logger.error(f"[IG-PAGE] Sahifa yuklash xatosi: {e}")
+            return None
+
+
+async def _download_story_item(session, item: dict, username: str) -> Optional[Tuple[str, Dict[str, Any]]]:
+    """Instagram story itemdan video/rasm yuklash."""
+    item_id = str(item.get("id", "unknown"))
+    media_type = item.get("media_type", 0)  # 1=rasm, 2=video
+
+    info = {
+        "id": item_id,
+        "title": f"Instagram Story - @{username}",
+        "uploader": username,
+        "uploader_id": item.get("user", {}).get("pk", ""),
+        "extractor": "instagram",
+        "extractor_key": "Instagram",
+        "webpage_url": f"https://www.instagram.com/stories/{username}/{item_id.split('_')[0]}/",
+        "duration": item.get("video_duration", 0) if media_type == 2 else 0,
+    }
+
+    if media_type == 2:
+        # Video story
+        video_versions = item.get("video_versions", [])
+        if not video_versions:
+            logger.error("[IG-API] Video versions topilmadi")
+            return None
+
+        # Eng yuqori sifatli versiyani tanlash
+        best_video = max(video_versions, key=lambda v: v.get("width", 0) * v.get("height", 0))
+        video_url = best_video.get("url", "")
+        if not video_url:
+            logger.error("[IG-API] Video URL bo'sh")
+            return None
+
+        info["width"] = best_video.get("width", 0)
+        info["height"] = best_video.get("height", 0)
+        info["ext"] = "mp4"
+
+        output_path = tempfile.mkdtemp()
+        file_path = os.path.join(output_path, f"{item_id}.mp4")
+
+        logger.info(f"[IG-API] Video yuklanmoqda: {best_video.get('width')}x{best_video.get('height')}")
+
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as dl_session:
+                async with dl_session.get(video_url) as resp:
+                    if resp.status != 200:
+                        logger.error(f"[IG-API] Video yuklash xatosi: status={resp.status}")
+                        return None
+                    with open(file_path, "wb") as f:
+                        async for chunk in resp.content.iter_chunked(8192):
+                            f.write(chunk)
+
+            file_size = os.path.getsize(file_path)
+            if file_size == 0:
+                logger.error("[IG-API] Yuklangan fayl bo'sh")
+                return None
+
+            logger.info(f"[IG-API] Video yuklandi: {file_size / 1024:.1f} KB")
+            return file_path, info
+
+        except Exception as e:
+            logger.error(f"[IG-API] Video yuklash xatosi: {e}")
+            return None
+
+    elif media_type == 1:
+        # Rasm story
+        image_versions = item.get("image_versions2", {}).get("candidates", [])
+        if not image_versions:
+            logger.error("[IG-API] Image versions topilmadi")
+            return None
+
+        best_image = max(image_versions, key=lambda v: v.get("width", 0) * v.get("height", 0))
+        image_url = best_image.get("url", "")
+        if not image_url:
+            logger.error("[IG-API] Image URL bo'sh")
+            return None
+
+        info["width"] = best_image.get("width", 0)
+        info["height"] = best_image.get("height", 0)
+        info["ext"] = "jpg"
+
+        output_path = tempfile.mkdtemp()
+        file_path = os.path.join(output_path, f"{item_id}.jpg")
+
+        logger.info(f"[IG-API] Rasm yuklanmoqda: {best_image.get('width')}x{best_image.get('height')}")
+
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as dl_session:
+                async with dl_session.get(image_url) as resp:
+                    if resp.status != 200:
+                        logger.error(f"[IG-API] Rasm yuklash xatosi: status={resp.status}")
+                        return None
+                    with open(file_path, "wb") as f:
+                        async for chunk in resp.content.iter_chunked(8192):
+                            f.write(chunk)
+
+            file_size = os.path.getsize(file_path)
+            if file_size == 0:
+                logger.error("[IG-API] Yuklangan fayl bo'sh")
+                return None
+
+            logger.info(f"[IG-API] Rasm yuklandi: {file_size / 1024:.1f} KB")
+            return file_path, info
+
+        except Exception as e:
+            logger.error(f"[IG-API] Rasm yuklash xatosi: {e}")
+            return None
+
+    else:
+        logger.error(f"[IG-API] Noma'lum media_type: {media_type}")
+        return None
+
+
+async def _download_media_url(session, media_url: str, prefix: str, ext: str) -> Optional[Tuple[str, Dict[str, Any]]]:
+    """To'g'ridan-to'g'ri media URL dan yuklash."""
+    import time as _time
+
+    output_path = tempfile.mkdtemp()
+    file_name = f"{prefix}_{int(_time.time())}.{ext}"
+    file_path = os.path.join(output_path, file_name)
+
+    try:
+        async with session.get(media_url) as resp:
+            if resp.status != 200:
+                logger.error(f"[IG-DL] Media yuklash xatosi: status={resp.status}")
+                return None
+            with open(file_path, "wb") as f:
+                async for chunk in resp.content.iter_chunked(8192):
+                    f.write(chunk)
+
+        file_size = os.path.getsize(file_path)
+        if file_size == 0:
+            logger.error("[IG-DL] Yuklangan fayl bo'sh")
+            return None
+
+        info = {
+            "id": f"{prefix}_{int(_time.time())}",
+            "title": f"Instagram Story",
+            "extractor": "instagram",
+            "ext": ext,
+        }
+
+        logger.info(f"[IG-DL] Media yuklandi: {file_size / 1024:.1f} KB")
+        return file_path, info
+
+    except Exception as e:
+        logger.error(f"[IG-DL] Media yuklash xatosi: {e}")
+        return None
+
+
+# ============================================================
 # YOUTUBE: Asosiy strategiya - avval Invidious/Piped API
 # ============================================================
 
@@ -231,7 +662,6 @@ async def _extract_youtube_info(url: str) -> Optional[Dict[str, Any]]:
     video_id = _extract_video_id(url)
 
     # === 1-BOSQICH: Cobalt API (o'z serverimiz) ===
-    # Cobalt info bermaydi, lekin video mavjudligini tasdiqlaydi
     cobalt_api_url = os.getenv("COBALT_API_URL", "")
 
     if cobalt_api_url:
@@ -241,7 +671,6 @@ async def _extract_youtube_info(url: str) -> Optional[Dict[str, Any]]:
             cobalt_result = await _try_cobalt(url, "720", False)
             if cobalt_result and cobalt_result.get("download_url"):
                 logger.info("[YouTube] Cobalt: Video mavjud! Info yaratilmoqda...")
-                # Cobalt info bermaydi, basic info yaratamiz
                 return {
                     "id": video_id or "unknown",
                     "title": "YouTube Video",
@@ -323,12 +752,58 @@ async def _extract_youtube_info(url: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _is_instagram_story(url: str) -> bool:
+    """Instagram story URL ekanligini tekshirish."""
+    return "/stories/" in url.lower()
+
+
+def _is_login_required_error(error: Exception) -> bool:
+    """Xato login talab qilish bilan bog'liq ekanligini tekshirish."""
+    err_str = str(error).lower()
+    login_keywords = [
+        "log in to access",
+        "login required",
+        "need to log in",
+        "private video",
+        "sign in",
+        "not available",
+        "you need to log in",
+    ]
+    return any(kw in err_str for kw in login_keywords)
+
+
+class LoginRequiredError(Exception):
+    """Login talab qilinadigan kontent uchun maxsus xato."""
+    def __init__(self, platform: str, content_type: str = "", missing_cookies: list = None):
+        self.platform = platform
+        self.content_type = content_type
+        self.missing_cookies = missing_cookies or []
+        super().__init__(f"{platform}: login required for {content_type}")
+
+
 async def _extract_non_youtube_info(url: str, platform: str) -> Optional[Dict[str, Any]]:
     """YouTube bo'lmagan platformalardan ma'lumot olish."""
     cookies_path = _find_cookies_file()
 
+    # Instagram stories maxsus tekshirish
+    is_story = platform == "instagram" and _is_instagram_story(url)
+    if is_story and not cookies_path:
+        logger.error("[instagram] Story uchun cookie kerak, lekin cookie fayl topilmadi!")
+        raise LoginRequiredError("instagram", "story", ["sessionid", "ds_user_id", "csrftoken"])
+
+    # Instagram stories uchun cookie validation
+    if is_story and cookies_path:
+        ig_validation = _validate_instagram_cookies(cookies_path)
+        if not ig_validation["valid"]:
+            logger.error(f"[instagram] Story cookie'lari yetarli emas! Yetishmayotgan: {ig_validation['missing']}")
+            raise LoginRequiredError("instagram", "story", ig_validation["missing"])
+
     for use_cookies in [True, False]:
         if use_cookies and not cookies_path:
+            continue
+
+        # Story uchun cookiesiz urinish o'tkazib yuboriladi
+        if is_story and not use_cookies:
             continue
 
         try:
@@ -343,11 +818,17 @@ async def _extract_non_youtube_info(url: str, platform: str) -> Optional[Dict[st
             if use_cookies:
                 opts["cookiefile"] = cookies_path
 
+            # Instagram uchun maxsus extractor sozlamalari
+            if platform == "instagram" and use_cookies:
+                opts["extractor_args"] = {"instagram": {"api": ["graphql"]}}
+
             proxy = os.getenv("HTTP_PROXY") or os.getenv("HTTPS_PROXY")
             if proxy:
                 opts["proxy"] = proxy
 
             label = "cookies" if use_cookies else "cookiesiz"
+            if platform == "instagram" and use_cookies:
+                label = "cookies+graphql"
             logger.info(f"[{platform}] Ma'lumot olinmoqda: {label}")
 
             with yt_dlp.YoutubeDL(opts) as ydl:
@@ -357,6 +838,12 @@ async def _extract_non_youtube_info(url: str, platform: str) -> Optional[Dict[st
 
         except Exception as e:
             logger.warning(f"[{platform}] {label} xato: {str(e)[:100]}")
+            # Instagram story + login xatosi → API fallback
+            if is_story and _is_login_required_error(e):
+                logger.info(f"[{platform}] yt-dlp story uchun ishlamadi, API fallback sinab ko'rilmoqda...")
+                # Info olish uchun API dan foydalanish (yuklamasdan)
+                # Hozircha LoginRequiredError qaytaramiz, yuklashda API fallback ishlaydi
+                raise LoginRequiredError("instagram", "story", [])
             continue
 
     logger.error(f"[{platform}] Barcha urinishlar muvaffaqiyatsiz")
@@ -499,92 +986,150 @@ async def _download_youtube(url: str, quality: str = "720",
 
 
 async def _download_non_youtube(url: str, quality: str, audio_only: bool) -> Optional[Tuple[str, Dict[str, Any]]]:
-    """YouTube bo'lmagan platformalardan yuklab olish."""
-    output_path = tempfile.mkdtemp()
+    """YouTube bo'lmagan platformalardan yuklab olish.
 
-    # 1-urinish: cookies bilan
-    try:
-        opts = _build_download_opts(output_path, quality, audio_only, use_cookies=True)
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            if info is None:
-                return None
+    Instagram stories uchun:
+    1. Avval yt-dlp bilan urinish (cookies + extractor_args)
+    2. Agar ishlamasa → to'g'ridan-to'g'ri Instagram API fallback
+    """
+    platform = detect_platform(url) or "unknown"
+    cookies_path = _find_cookies_file()
+    is_story = platform == "instagram" and _is_instagram_story(url)
 
-            file_path = ydl.prepare_filename(info)
-            if audio_only and config.download.ffmpeg_available:
-                base_path = os.path.splitext(file_path)[0]
-                mp3_path = base_path + ".mp3"
-                if os.path.exists(mp3_path):
-                    file_path = mp3_path
+    # === INSTAGRAM STORY: To'g'ridan-to'g'ri API fallback ===
+    # Agar yt-dlp ishlamasa, API dan foydalanamiz
+    if is_story and cookies_path:
+        # Cookie'larni tekshirish
+        ig_validation = _validate_instagram_cookies(cookies_path)
 
-            if not os.path.exists(file_path):
-                files = os.listdir(output_path)
-                if files:
-                    file_path = os.path.join(output_path, files[0])
+        if ig_validation["valid"]:
+            # Avval yt-dlp bilan urinish
+            attempts = [
+                (True, None, {"instagram": {"api": ["graphql"]}}),       # cookies + graphql API
+                (True, None, {"instagram": {"api": ["rest"]}}),          # cookies + rest API
+                (True, "all/mergeall", None),                             # cookies + mergeall
+                (True, "best", None),                                      # cookies + best
+            ]
+
+            for i, (use_cookies, fmt_override, extractor_args) in enumerate(attempts, 1):
+                output_path = tempfile.mkdtemp()
+                try:
+                    opts = _build_download_opts(output_path, quality, audio_only, use_cookies, fmt_override)
+
+                    if extractor_args:
+                        opts["extractor_args"] = extractor_args
+
+                    label = f"cookies{'+' + fmt_override if fmt_override else ''}"
+                    if extractor_args:
+                        label += f"+{list(extractor_args.get('instagram', {}).get('api', ['']))[0]}"
+                    logger.info(f"[{platform}] Story urinish {i}/{len(attempts)}: {label}")
+
+                    with yt_dlp.YoutubeDL(opts) as ydl:
+                        info = ydl.extract_info(url, download=True)
+                        if info is None:
+                            continue
+
+                        file_path = ydl.prepare_filename(info)
+                        if audio_only and config.download.ffmpeg_available:
+                            base_path = os.path.splitext(file_path)[0]
+                            mp3_path = base_path + ".mp3"
+                            if os.path.exists(mp3_path):
+                                file_path = mp3_path
+
+                        if not os.path.exists(file_path):
+                            files = os.listdir(output_path)
+                            if files:
+                                file_path = os.path.join(output_path, files[0])
+                            else:
+                                continue
+
+                        logger.info(f"[{platform}] Story yuklash muvaffaqiyatli: {label}")
+                        return file_path, info
+
+                except Exception as e:
+                    err_str = str(e)
+                    logger.warning(f"[{platform}] Story xatosi ({label}): {err_str[:120]}")
+
+                    if _is_login_required_error(e):
+                        # yt-dlp ishlamadi → API fallbackga o'tamiz
+                        logger.info(f"[{platform}] yt-dlp login xatosi, API fallback boshlanmoqda...")
+                        break
+                    continue
+
+            # === API FALLBACK ===
+            logger.info(f"[{platform}] yt-dlp ishlamadi, Instagram API orqali yuklash boshlanmoqda...")
+            try:
+                api_result = await _download_instagram_story_api(url, cookies_path)
+                if api_result:
+                    logger.info(f"[{platform}] API orqali story yuklash MUVOFAQIYATLI!")
+                    return api_result
                 else:
-                    return None
-            return file_path, info
+                    logger.error(f"[{platform}] API orqali ham yuklab bo'lmadi")
+            except Exception as e:
+                logger.error(f"[{platform}] API fallback xatosi: {e}")
 
-    except Exception as e:
-        logger.error(f"Yuklash xatosi (cookies bilan): {e}")
+            # Barcha urinishlar muvaffaqiyatsiz
+            raise LoginRequiredError("instagram", "story", ig_validation.get("missing", []))
 
-    # 2-urinish: format="all/mergeall"
-    try:
-        output_path2 = tempfile.mkdtemp()
-        opts2 = _build_download_opts(output_path2, quality, audio_only, use_cookies=True, format_override="all/mergeall")
-        with yt_dlp.YoutubeDL(opts2) as ydl:
-            info = ydl.extract_info(url, download=True)
-            if info is None:
-                return None
-            file_path = ydl.prepare_filename(info)
-            if not os.path.exists(file_path):
-                files = os.listdir(output_path2)
-                if files:
-                    file_path = os.path.join(output_path2, files[0])
-                else:
-                    return None
-            return file_path, info
-    except Exception as e:
-        logger.warning(f"Yuklash xatosi (all/mergeall): {e}")
+        else:
+            # Cookie'lar yetarli emas
+            logger.error(f"[{platform}] Story cookie'lari yetarli emas: {ig_validation['missing']}")
+            raise LoginRequiredError("instagram", "story", ig_validation["missing"])
 
-    # 3-urinish: cookiesiz
-    try:
-        output_path3 = tempfile.mkdtemp()
-        opts3 = _build_download_opts(output_path3, quality, audio_only, use_cookies=False)
-        with yt_dlp.YoutubeDL(opts3) as ydl:
-            info = ydl.extract_info(url, download=True)
-            if info is None:
-                return None
-            file_path = ydl.prepare_filename(info)
-            if not os.path.exists(file_path):
-                files = os.listdir(output_path3)
-                if files:
-                    file_path = os.path.join(output_path3, files[0])
-                else:
-                    return None
-            return file_path, info
-    except Exception as e:
-        logger.warning(f"Yuklash xatosi (cookiesiz): {e}")
+    elif is_story and not cookies_path:
+        # Story uchun cookie yo'q
+        raise LoginRequiredError("instagram", "story", ["sessionid", "ds_user_id", "csrftoken"])
 
-    # 4-urinish: cookies + best
-    try:
-        output_path4 = tempfile.mkdtemp()
-        opts4 = _build_download_opts(output_path4, quality, audio_only, use_cookies=True, format_override="best")
-        with yt_dlp.YoutubeDL(opts4) as ydl:
-            info = ydl.extract_info(url, download=True)
-            if info is None:
-                return None
-            file_path = ydl.prepare_filename(info)
-            if not os.path.exists(file_path):
-                files = os.listdir(output_path4)
-                if files:
-                    file_path = os.path.join(output_path4, files[0])
-                else:
-                    return None
-            return file_path, info
-    except Exception as fallback_err:
-        logger.error(f"Barcha yuklash urinishlari muvaffaqiyatsiz: {fallback_err}")
-        return None
+    # === ODDIY (STORY BO'LMAGAN) YUKLASH ===
+    attempts = []
+    if cookies_path:
+        attempts.append((True, None))          # 1: cookies + standard
+        attempts.append((True, "all/mergeall")) # 2: cookies + mergeall
+    attempts.append((False, None))              # 3: cookiesiz
+    if cookies_path:
+        attempts.append((True, "best"))          # 4: cookies + best
+
+    for i, (use_cookies, fmt_override) in enumerate(attempts, 1):
+        output_path = tempfile.mkdtemp()
+        try:
+            opts = _build_download_opts(output_path, quality, audio_only, use_cookies, fmt_override)
+
+            # Instagram uchun extractor_args
+            if platform == "instagram" and use_cookies:
+                opts["extractor_args"] = {"instagram": {"api": ["graphql"]}}
+
+            label = f"cookies{'+' + fmt_override if fmt_override else ''}" if use_cookies else "cookiesiz"
+            logger.info(f"[{platform}] Yuklash urinish {i}/{len(attempts)}: {label}")
+
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                if info is None:
+                    continue
+
+                file_path = ydl.prepare_filename(info)
+                if audio_only and config.download.ffmpeg_available:
+                    base_path = os.path.splitext(file_path)[0]
+                    mp3_path = base_path + ".mp3"
+                    if os.path.exists(mp3_path):
+                        file_path = mp3_path
+
+                if not os.path.exists(file_path):
+                    files = os.listdir(output_path)
+                    if files:
+                        file_path = os.path.join(output_path, files[0])
+                    else:
+                        continue
+
+                logger.info(f"[{platform}] Yuklash muvaffaqiyatli: {label}")
+                return file_path, info
+
+        except Exception as e:
+            err_str = str(e)
+            logger.warning(f"[{platform}] Yuklash xatosi ({label}): {err_str[:100]}")
+            continue
+
+    logger.error(f"[{platform}] Barcha yuklash urinishlari muvaffaqiyatsiz")
+    return None
 
 
 async def download_video_auto_quality(url: str, start_quality: str = "720",
