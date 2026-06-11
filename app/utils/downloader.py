@@ -229,10 +229,10 @@ def _build_base_opts(use_cookies: bool = True) -> Dict[str, Any]:
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
-        "socket_timeout": 30,
-        "retries": 3,
-        "fragment_retries": 3,
-        "file_access_retries": 3,
+        "socket_timeout": 15,
+        "retries": 1,
+        "fragment_retries": 1,
+        "file_access_retries": 1,
     }
 
     if use_cookies:
@@ -986,120 +986,82 @@ async def _download_youtube(url: str, quality: str = "720",
 
 
 async def _download_non_youtube(url: str, quality: str, audio_only: bool) -> Optional[Tuple[str, Dict[str, Any]]]:
-    """YouTube bo'lmagan platformalardan yuklab olish.
+    """YouTube bo'lmagan platformalardan yuklab olish — TEZ versiya.
 
-    Instagram stories uchun:
-    1. Avval yt-dlp bilan urinish (cookies + extractor_args)
-    2. Agar ishlamasa → to'g'ridan-to'g'ri Instagram API fallback
+    Instagram stories: 1-urinish yt-dlp → keyin to'g'ridan-to'g'ri API
+    Boshqa platformalar: 1-urinish cookies → 2-urinish cookiesiz
     """
     platform = detect_platform(url) or "unknown"
     cookies_path = _find_cookies_file()
     is_story = platform == "instagram" and _is_instagram_story(url)
 
-    # === INSTAGRAM STORY: To'g'ridan-to'g'ri API fallback ===
-    # Agar yt-dlp ishlamasa, API dan foydalanamiz
+    # === INSTAGRAM STORY: 1 marta yt-dlp + API fallback ===
     if is_story and cookies_path:
-        # Cookie'larni tekshirish
         ig_validation = _validate_instagram_cookies(cookies_path)
 
         if ig_validation["valid"]:
-            # Avval yt-dlp bilan urinish
-            attempts = [
-                (True, None, {"instagram": {"api": ["graphql"]}}),       # cookies + graphql API
-                (True, None, {"instagram": {"api": ["rest"]}}),          # cookies + rest API
-                (True, "all/mergeall", None),                             # cookies + mergeall
-                (True, "best", None),                                      # cookies + best
-            ]
+            # 1-urinish: yt-dlp (faqat 1 marta, tez)
+            output_path = tempfile.mkdtemp()
+            try:
+                opts = _build_download_opts(output_path, quality, audio_only, True, "best")
+                opts["extractor_args"] = {"instagram": {"api": ["graphql"]}}
 
-            for i, (use_cookies, fmt_override, extractor_args) in enumerate(attempts, 1):
-                output_path = tempfile.mkdtemp()
-                try:
-                    opts = _build_download_opts(output_path, quality, audio_only, use_cookies, fmt_override)
+                logger.info(f"[{platform}] Story: yt-dlp urinish...")
 
-                    if extractor_args:
-                        opts["extractor_args"] = extractor_args
-
-                    label = f"cookies{'+' + fmt_override if fmt_override else ''}"
-                    if extractor_args:
-                        label += f"+{list(extractor_args.get('instagram', {}).get('api', ['']))[0]}"
-                    logger.info(f"[{platform}] Story urinish {i}/{len(attempts)}: {label}")
-
-                    with yt_dlp.YoutubeDL(opts) as ydl:
-                        info = ydl.extract_info(url, download=True)
-                        if info is None:
-                            continue
-
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+                    if info:
                         file_path = ydl.prepare_filename(info)
                         if audio_only and config.download.ffmpeg_available:
                             base_path = os.path.splitext(file_path)[0]
                             mp3_path = base_path + ".mp3"
                             if os.path.exists(mp3_path):
                                 file_path = mp3_path
-
                         if not os.path.exists(file_path):
                             files = os.listdir(output_path)
                             if files:
                                 file_path = os.path.join(output_path, files[0])
                             else:
-                                continue
+                                file_path = None
+                        if file_path:
+                            logger.info(f"[{platform}] Story yt-dlp MUVOFAQIYATLI!")
+                            return file_path, info
 
-                        logger.info(f"[{platform}] Story yuklash muvaffaqiyatli: {label}")
-                        return file_path, info
+            except Exception as e:
+                logger.warning(f"[{platform}] Story yt-dlp xato: {str(e)[:80]}")
 
-                except Exception as e:
-                    err_str = str(e)
-                    logger.warning(f"[{platform}] Story xatosi ({label}): {err_str[:120]}")
-
-                    if _is_login_required_error(e):
-                        # yt-dlp ishlamadi → API fallbackga o'tamiz
-                        logger.info(f"[{platform}] yt-dlp login xatosi, API fallback boshlanmoqda...")
-                        break
-                    continue
-
-            # === API FALLBACK ===
-            logger.info(f"[{platform}] yt-dlp ishlamadi, Instagram API orqali yuklash boshlanmoqda...")
+            # 2-urinish: Instagram API (to'g'ridan-to'g'ri)
+            logger.info(f"[{platform}] Story: API fallback...")
             try:
                 api_result = await _download_instagram_story_api(url, cookies_path)
                 if api_result:
-                    logger.info(f"[{platform}] API orqali story yuklash MUVOFAQIYATLI!")
+                    logger.info(f"[{platform}] Story API MUVOFAQIYATLI!")
                     return api_result
-                else:
-                    logger.error(f"[{platform}] API orqali ham yuklab bo'lmadi")
             except Exception as e:
-                logger.error(f"[{platform}] API fallback xatosi: {e}")
+                logger.error(f"[{platform}] Story API xato: {e}")
 
-            # Barcha urinishlar muvaffaqiyatsiz
             raise LoginRequiredError("instagram", "story", ig_validation.get("missing", []))
 
         else:
-            # Cookie'lar yetarli emas
             logger.error(f"[{platform}] Story cookie'lari yetarli emas: {ig_validation['missing']}")
             raise LoginRequiredError("instagram", "story", ig_validation["missing"])
 
     elif is_story and not cookies_path:
-        # Story uchun cookie yo'q
         raise LoginRequiredError("instagram", "story", ["sessionid", "ds_user_id", "csrftoken"])
 
-    # === ODDIY (STORY BO'LMAGAN) YUKLASH ===
+    # === ODDIY (STORY BO'LMAGAN) YUKLASH — faqat 2 urinish ===
     attempts = []
     if cookies_path:
-        attempts.append((True, None))          # 1: cookies + standard
-        attempts.append((True, "all/mergeall")) # 2: cookies + mergeall
-    attempts.append((False, None))              # 3: cookiesiz
-    if cookies_path:
-        attempts.append((True, "best"))          # 4: cookies + best
+        attempts.append((True, "best"))          # 1: cookies + best
+    attempts.append((False, "best"))              # 2: cookiesiz + best
 
     for i, (use_cookies, fmt_override) in enumerate(attempts, 1):
         output_path = tempfile.mkdtemp()
         try:
             opts = _build_download_opts(output_path, quality, audio_only, use_cookies, fmt_override)
 
-            # Instagram uchun extractor_args
-            if platform == "instagram" and use_cookies:
-                opts["extractor_args"] = {"instagram": {"api": ["graphql"]}}
-
-            label = f"cookies{'+' + fmt_override if fmt_override else ''}" if use_cookies else "cookiesiz"
-            logger.info(f"[{platform}] Yuklash urinish {i}/{len(attempts)}: {label}")
+            label = "cookies" if use_cookies else "cookiesiz"
+            logger.info(f"[{platform}] Yuklash {i}/{len(attempts)}: {label}")
 
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=True)
@@ -1124,8 +1086,7 @@ async def _download_non_youtube(url: str, quality: str, audio_only: bool) -> Opt
                 return file_path, info
 
         except Exception as e:
-            err_str = str(e)
-            logger.warning(f"[{platform}] Yuklash xatosi ({label}): {err_str[:100]}")
+            logger.warning(f"[{platform}] Yuklash xatosi ({label}): {str(e)[:80]}")
             continue
 
     logger.error(f"[{platform}] Barcha yuklash urinishlari muvaffaqiyatsiz")
