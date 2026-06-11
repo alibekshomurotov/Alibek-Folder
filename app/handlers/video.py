@@ -1,3 +1,5 @@
+"""Video Handler - Video download processing"""
+
 import asyncio
 import logging
 import os
@@ -37,69 +39,101 @@ _video_cache: Dict[str, dict] = {}
 _CACHE_TTL = 1800  # 30 daqiqa (sekundlarda)
 
 
-def _ensure_mp4(file_path: str) -> str:
+def _ensure_mp4(file_path: str, force_reencode: bool = False) -> str:
     """Fayl mp4 formatida ekanligini ta'minlash.
 
     Telegram faqat mp4 formatidagi videolarni to'g'ri ko'rsatadi
     va gallereyaga saqlash imkonini beradi. Agar fayl boshqa formatda
     bo'lsa (webm, mkv va h.k.), ffmpeg bilan mp4 ga o'tkazamiz.
+
+    MUHIM: Instagram va boshqa platformalardan kelgan .mp4 fayllar
+    ham Telegram uchun MOS BO'LMASLIGI MUMKIN (codec, moov atom joylashuvi).
+    force_reencode=True bo'lsa, .mp4 fayllar ham qayta kodlanadi.
     """
     if not os.path.exists(file_path):
         return file_path
 
     # Fayl kengaytmasini tekshirish
     ext = os.path.splitext(file_path)[1].lower()
-    if ext == ".mp4":
+
+    # .mp4 bo'lsa VA force_reencode yo'q bo'lsa — o'zgartirmasdan qaytaramiz
+    if ext == ".mp4" and not force_reencode:
         return file_path
 
-    # Fayl allaqachon mp4 bo'lishi mumkin (kengaytma noto'g'ri)
-    # FFmpeg bor bo'lsa, tekshiramiz
+    # FFmpeg yo'q bo'lsa
     if not config.download.ffmpeg_available:
         # FFmpeg yo'q, fayl nomini o'zgartiramiz
-        new_path = file_path.rsplit(".", 1)[0] + ".mp4"
-        os.rename(file_path, new_path)
-        return new_path
+        if ext != ".mp4":
+            new_path = file_path.rsplit(".", 1)[0] + ".mp4"
+            os.rename(file_path, new_path)
+            return new_path
+        return file_path
 
     try:
-        # FFmpeg bilan mp4 ga konvertatsiya
+        # FFmpeg bilan mp4 ga konvertatsiya (yoki qayta kodlash)
         new_path = file_path.rsplit(".", 1)[0] + ".mp4"
-        logger.info(f"[Video] Konvertatsiya: {ext} → mp4")
+        # Agar fayl allaqachon .mp4 bo'lsa, vaqtinchalik faylga yozamiz
+        if file_path == new_path:
+            new_path = file_path.rsplit(".", 1)[0] + "_telegram.mp4"
+
+        action = "qayta kodlash" if ext == ".mp4" else f"konvertatsiya: {ext} → mp4"
+        logger.info(f"[Video] {action}")
 
         result = subprocess.run(
-            ["ffmpeg", "-i", file_path, "-c:v", "libx264",
-             "-c:a", "aac", "-movflags", "+faststart",
-             "-preset", "fast", "-crf", "28",
+            ["ffmpeg", "-i", file_path,
+             "-c:v", "libx264",
+             "-c:a", "aac",
+             "-movflags", "+faststart",
+             "-preset", "fast",
+             "-crf", "28",
+             "-pix_fmt", "yuv420p",
              "-y", new_path],
-            capture_output=True, timeout=60
+            capture_output=True, timeout=90
         )
 
-        if result.returncode == 0 and os.path.exists(new_path):
+        if result.returncode == 0 and os.path.exists(new_path) and os.path.getsize(new_path) > 0:
             # Eski faylni o'chirish
             try:
-                os.remove(file_path)
+                if file_path != new_path:
+                    os.remove(file_path)
             except OSError:
                 pass
-            logger.info("[Video] Konvertatsiya muvaffaqiyatli")
+            logger.info(f"[Video] {action} muvaffaqiyatli")
             return new_path
         else:
-            logger.warning(f"[Video] Konvertatsiya xatosi, fayl nomi o'zgartiriladi")
-            # Konvertatsiya muvaffaqiyatsiz - faqat nomini o'zgartiramiz
-            if not os.path.exists(new_path):
-                os.rename(file_path, new_path)
-            return new_path
+            # Konvertatsiya muvaffaqiyatsiz
+            stderr_output = result.stderr.decode('utf-8', errors='ignore')[-200:] if result.stderr else ""
+            logger.warning(f"[Video] Konvertatsiya xatosi: {stderr_output}")
+            # Agar yangi fayl yaratilgan bo'lsa o'chiramiz
+            if os.path.exists(new_path) and file_path != new_path:
+                try:
+                    os.remove(new_path)
+                except OSError:
+                    pass
+            # Fayl nomini o'zgartiramiz (oxirgi chora)
+            if ext != ".mp4":
+                renamed_path = file_path.rsplit(".", 1)[0] + ".mp4"
+                if not os.path.exists(renamed_path):
+                    os.rename(file_path, renamed_path)
+                    return renamed_path
+            return file_path
 
     except subprocess.TimeoutExpired:
         logger.warning("[Video] Konvertatsiya timeout, fayl nomi o'zgartiriladi")
-        new_path = file_path.rsplit(".", 1)[0] + ".mp4"
-        if not os.path.exists(new_path):
-            os.rename(file_path, new_path)
-        return new_path
+        if ext != ".mp4":
+            new_path = file_path.rsplit(".", 1)[0] + ".mp4"
+            if not os.path.exists(new_path):
+                os.rename(file_path, new_path)
+                return new_path
+        return file_path
     except Exception as e:
         logger.warning(f"[Video] Konvertatsiya xatosi: {e}")
-        new_path = file_path.rsplit(".", 1)[0] + ".mp4"
-        if not os.path.exists(new_path):
-            os.rename(file_path, new_path)
-        return new_path
+        if ext != ".mp4":
+            new_path = file_path.rsplit(".", 1)[0] + ".mp4"
+            if not os.path.exists(new_path):
+                os.rename(file_path, new_path)
+                return new_path
+        return file_path
 
 
 def _format_story_error(missing_cookies: list = None) -> str:
@@ -463,10 +497,16 @@ async def _send_video(callback: CallbackQuery, file_path: str, info: dict,
     va telefonga saqlab bo'lmaydi.
     """
     # Faylni mp4 formatiga keltirish
-    file_path = _ensure_mp4(file_path)
+    # Instagram va boshqa platformalardan kelgan .mp4 fayllar
+    # Telegram uchun mos bo'lmasligi mumkin (codec, moov atom),
+    # shuning uchun force_reencode=True bilan qayta kodlaymiz
+    extractor = info.get("extractor", "") if info else ""
+    # Instagram story va reels lar uchun qayta kodlash kerak
+    force_reencode = extractor in ("instagram",) or "/stories/" in str(info.get("webpage_url", ""))
+    file_path = _ensure_mp4(file_path, force_reencode=force_reencode)
 
     # Thumbnail URL
-    thumbnail_url = info.get("thumbnail", "")
+    thumbnail_url = info.get("thumbnail", "") if info else ""
 
     caption = format_video_caption(info, quality.upper())
 
