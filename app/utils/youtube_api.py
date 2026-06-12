@@ -1,3 +1,14 @@
+"""YouTube alternative downloader using Cobalt, Invidious, Piped APIs.
+
+Cobalt (cobalt.tools) - eng ishonchli, maxsus YouTube yuklash uchun yaratilgan.
+Invidious/Piped - alternative YouTube frontendlar.
+
+MUHIM: YOUTUBE_PROXY env orqali SOCKS5/HTTP proxy berish mumkin.
+Bu Render kabi datacenter IP larda YouTube yuklash uchun kerak.
+
+MUHIM: Agar proxy buzilgan bo'lsa, kod avtomatik proxiesz urinadi!
+"""
+
 import logging
 import os
 import tempfile
@@ -138,6 +149,54 @@ def _extract_video_id(url: str) -> Optional[str]:
 # COBALT API
 # ============================================================
 
+async def _wake_hf_space(api_url: str) -> bool:
+    """Hugging Face Space ni uyg'otish (sleep mode dan chiqarish).
+
+    HF Space bepul rejimida 5 daqiqadan keyin uxlaydi.
+    Uyg'otish uchun GET so'rov yuboramiz va API tayyor bo'lishini kutamiz.
+    """
+    if ".hf.space" not in api_url:
+        return True  # HF Space emas, uyg'otish shart emas
+
+    try:
+        logger.info(f"[Cobalt] HF Space uyg'otilmoqda...")
+        async with aiohttp.ClientSession(headers=HEADERS) as session:
+            # Space sahifasini ochish — uyg'onishni boshlaydi
+            async with session.get(
+                api_url.rstrip("/"),
+                timeout=aiohttp.ClientTimeout(total=15),
+                allow_redirects=True,
+            ) as resp:
+                status = resp.status
+                logger.info(f"[Cobalt] HF Space javob: HTTP {status}")
+
+                # Agar HTML qaytarsa — Space uyg'onyapti yoki ishlamayapti
+                body = await resp.text()
+                if body.strip().startswith("<"):
+                    # Space uyg'onyapti — biroz kutamiz
+                    import asyncio
+                    logger.info("[Cobalt] HF Space uyg'onyapti, 5 sekund kutilmoqda...")
+                    await asyncio.sleep(5)
+
+                    # Qayta tekshirish
+                    async with session.get(
+                        f"{api_url.rstrip('/')}/api/json",
+                        timeout=aiohttp.ClientTimeout(total=15),
+                    ) as resp2:
+                        body2 = await resp2.text()
+                        if body2.strip().startswith("<"):
+                            logger.warning("[Cobalt] HF Space hali ham HTML qaytarayapti — API ishlamayapti")
+                            return False
+                        logger.info("[Cobalt] HF Space API tayyor!")
+                        return True
+
+                return True  # HTML emas — tayyor
+
+    except Exception as e:
+        logger.warning(f"[Cobalt] HF Space uyg'otish xatosi: {e}")
+        return False
+
+
 async def _try_cobalt(url: str, quality: str = "720", audio_only: bool = False) -> Optional[Dict[str, Any]]:
     """Cobalt API orqali video yuklab olish."""
     # Har safar env dan o'qish (modul yuklanganda emas)
@@ -156,12 +215,15 @@ async def _try_cobalt(url: str, quality: str = "720", audio_only: bool = False) 
 
     logger.info(f"[Cobalt] {api_url} ga so'rov yuborilmoqda (kalit: {'bor' if api_key else 'yo\'q'})...")
 
-    # Cobalt API v7+ endpointlari (eski versiyalar uchun ham moslash)
-    # v7+: /api/json  |  v6 va undan oldin: /
-    endpoints = [
-        f"{api_url.rstrip('/')}/api/json",   # v7+ — eng keng tarqalgan
-        f"{api_url.rstrip('/')}/",             # v6 va undan oldin
-    ]
+    # HF Space bo'lsa, avval uyg'otamiz
+    space_ready = await _wake_hf_space(api_url)
+    if not space_ready:
+        logger.error("[Cobalt] HF Space ishlamayapti yoki API noto'g'ri o'rnatilgan!")
+        return None
+
+    # Cobalt v7+ API endpoint
+    # v7.15+: /api/json ishlaydi (GET / → /api/serverInfo ga redirect)
+    endpoint = f"{api_url.rstrip('/')}/api/json"
 
     connector = _get_proxy_connector()
     proxy = _get_proxy_url() if not connector else None
@@ -186,86 +248,84 @@ async def _try_cobalt(url: str, quality: str = "720", audio_only: bool = False) 
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
-    for endpoint in endpoints:
-        try:
-            async with aiohttp.ClientSession(connector=connector) as session:
-                async with session.post(
-                    endpoint,
-                    json=payload,
-                    headers=headers,
-                    proxy=proxy,
-                    timeout=aiohttp.ClientTimeout(total=15),
-                ) as resp:
-                    body = await resp.text()
-                    logger.info(f"[Cobalt] POST {endpoint} → HTTP {resp.status} - {body[:200]}")
+    try:
+        async with aiohttp.ClientSession(connector=connector) as session:
+            async with session.post(
+                endpoint,
+                json=payload,
+                headers=headers,
+                proxy=proxy,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                body = await resp.text()
+                logger.info(f"[Cobalt] POST {endpoint} → HTTP {resp.status} - {body[:300]}")
 
-                    # HTML javob = noto'g'ri endpoint (HF Space sahifasi)
-                    if resp.status in (200, 206) and body.strip().startswith("<"):
-                        logger.warning(f"[Cobalt] HTML javob — bu endpoint emas, keyingi urinilmoqda...")
-                        continue
+                # HTML javob = noto'g'ri
+                if body.strip().startswith("<"):
+                    logger.error("[Cobalt] HTML javob — API noto'g'ri sozlangan!")
+                    return None
 
-                    if resp.status == 400 and ("jwt.missing" in body or "jwt.invalid" in body):
-                        logger.error("[Cobalt] JWT autentifikatsiya xatosi! COBALT_API_KEY ni tekshiring.")
-                        return None
+                if resp.status == 401:
+                    logger.error("[Cobalt] 401 — API_KEY kerak! HF Space va Render ga qo'shing.")
+                    return None
 
-                    if resp.status == 401:
-                        logger.error("[Cobalt] 401 Ruxsat yo'q! COBALT_API_KEY noto'g'ri bo'lishi mumkin.")
-                        return None
+                if resp.status != 200:
+                    logger.warning(f"[Cobalt] HTTP {resp.status}")
+                    return None
 
-                    if resp.status != 200:
-                        continue
+                try:
+                    data = await resp.json()
+                except Exception:
+                    logger.warning("[Cobalt] JSON parse xatosi")
+                    return None
 
-                    try:
-                        data = await resp.json()
-                    except Exception:
-                        logger.warning("[Cobalt] JSON parse xatosi")
-                        continue
+                status = data.get("status", "")
 
-                    status = data.get("status", "")
-
-                    if status == "error":
-                        error_code = data.get("error", {}).get("code", "noma_lum") if isinstance(data.get("error"), dict) else str(data.get("error", ""))
-                        if "login" in error_code:
-                            logger.error(f"[Cobalt] YouTube cookie kerak! Xato: {error_code}")
-                        else:
-                            logger.warning(f"[Cobalt] {endpoint}: Xato - {error_code}")
-                        return None
-
-                    # Redirect/javob - turli Cobalt versiyalar
-                    download_url = data.get("url")
-
-                    if not download_url:
-                        # Cobalt v7+ tunnel/javob formati
-                        tunnel = data.get("tunnel")
-                        if tunnel:
-                            download_url = tunnel
-
-                    if not download_url:
-                        picker = data.get("picker", [])
-                        if picker and isinstance(picker, list):
-                            download_url = picker[0].get("url")
-
-                    if download_url:
-                        logger.info(f"[Cobalt] {endpoint}: Yuklash URL topildi!")
-                        return {
-                            "source": "cobalt",
-                            "download_url": download_url,
-                            "audio_only": audio_only,
-                        }
+                if status == "error":
+                    # Cobalt v7.15 xato formati: {"status":"error","text":"..."}
+                    # yoki {"status":"error","error":{"code":"..."}}
+                    error_text = data.get("text", "")
+                    if error_text:
+                        logger.warning(f"[Cobalt] Xato: {error_text[:200]}")
+                        if "cookie" in error_text.lower() or "login" in error_text.lower():
+                            logger.error("[Cobalt] YouTube cookie kerak! HF Space ga COOKIE_PATH qo'shing.")
                     else:
-                        logger.warning(f"[Cobalt] {endpoint}: URL topilmadi, javob: {str(data)[:200]}")
+                        error_obj = data.get("error", {})
+                        if isinstance(error_obj, dict):
+                            error_code = error_obj.get("code", "noma'lum")
+                        else:
+                            error_code = str(error_obj)
+                        logger.warning(f"[Cobalt] Xato kodi: {error_code}")
+                        if "cookie" in str(error_code).lower() or "login" in str(error_code).lower():
+                            logger.error("[Cobalt] YouTube cookie kerak! HF Space ga COOKIE_PATH qo'shing.")
+                    return None
 
-        except aiohttp.ClientConnectorError as e:
-            logger.warning(f"[Cobalt] Proxy ulanish xatosi: {str(e)[:80]}")
-            _mark_proxy_broken()
-        except Exception as e:
-            logger.warning(f"[Cobalt] {endpoint}: Xato - {str(e)[:100]}")
+                # Yuklash URL
+                download_url = data.get("url")
+                if not download_url:
+                    tunnel = data.get("tunnel")
+                    if tunnel:
+                        download_url = tunnel
+                if not download_url:
+                    picker = data.get("picker", [])
+                    if picker and isinstance(picker, list):
+                        download_url = picker[0].get("url")
 
-        except aiohttp.ClientConnectorError as e:
-            logger.warning(f"[Cobalt] Proxy ulanish xatosi: {str(e)[:80]}")
-            _mark_proxy_broken()
-        except Exception as e:
-         logger.warning(f"[Cobalt] {api_url}: Xato - {str(e)[:100]}")
+                if download_url:
+                    logger.info("[Cobalt] Yuklash URL topildi!")
+                    return {
+                        "source": "cobalt",
+                        "download_url": download_url,
+                        "audio_only": audio_only,
+                    }
+                else:
+                    logger.warning(f"[Cobalt] URL topilmadi: {str(data)[:200]}")
+
+    except aiohttp.ClientConnectorError as e:
+        logger.warning(f"[Cobalt] Ulanish xatosi: {str(e)[:80]}")
+        _mark_proxy_broken()
+    except Exception as e:
+        logger.warning(f"[Cobalt] Xato: {str(e)[:100]}")
 
     return None
 

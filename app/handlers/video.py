@@ -32,7 +32,7 @@ _url_cache: Dict[str, dict] = {}
 _CACHE_TTL = 1800  # 30 daqiqa
 
 # Bot username
-_BOT_LINK = "@Otiribsanmi-bot"
+_BOT_LINK = "@UzVideoSaveBot"
 
 
 def _ensure_mp4(file_path: str, force_reencode: bool = False) -> str:
