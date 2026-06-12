@@ -1,9 +1,12 @@
+import asyncio
 import json
 import logging
 import os
 import tempfile
-from typing import Optional, Dict, Any, Tuple
-from urllib.parse import urlparse, parse_qs
+import time
+import random
+from typing import Optional, Dict, Any, Tuple, List
+from urllib.parse import urlparse, parse_qs, quote_plus
 
 import aiohttp
 
@@ -20,9 +23,12 @@ YOUTUBE_PROXY = os.getenv("YOUTUBE_PROXY", "") or os.getenv("HTTP_PROXY", "") or
 # Proxy holati - agar proxy xato bersa, keyingi so'rovlarda ishlatmaymiz
 _proxy_broken = False
 
+# PO Token - YouTube bot detektsiyasini chetlab o'tish uchun
+PO_TOKEN = os.getenv("PO_TOKEN", "")
+
 # Invidious instances - 2026 yil iyunda yangilangan
 INVIDIOUS_INSTANCES = [
-    # Eng ishonchli
+    # Eng ishonchli (tezroq)
     "https://inv.nadeko.net",
     "https://invidious.nerdvpn.de",
     "https://iv.datura.network",
@@ -43,7 +49,11 @@ INVIDIOUS_INSTANCES = [
     "https://invidious.privacy.de",
     "https://invidious.lunar.icu",
     "https://inv.bp.projectsegfau.lt",
-    "https://invidious.fdn.fr",
+    # Qo'shimcha yangi instancelar
+    "https://invidious.private.coffee",
+    "https://inv.tux.pizza",
+    "https://iv.melmac.space",
+    "https://inv.citw.lgbt",
 ]
 
 # Piped instances - 2026 yil iyunda yangilangan
@@ -63,8 +73,48 @@ HEADERS = {
     "Accept": "application/json",
 }
 
-_FAST_INVIDIOUS = INVIDIOUS_INSTANCES[:4]  # 4 ta (8 juda sekin)
-_FAST_PIPED = PIPED_INSTANCES[:3]  # 3 ta
+_FAST_INVIDIOUS = INVIDIOUS_INSTANCES[:6]  # 6 ta tezkor
+_FAST_PIPED = PIPED_INSTANCES[:4]  # 4 ta tezkor
+
+# InnerTube API klientlari - har xil platforma emulyatsiyasi
+INNERTUBE_CLIENTS = {
+    "web": {
+        "clientName": "WEB",
+        "clientVersion": "2.20240726.00.00",
+        "hl": "en",
+        "gl": "US",
+    },
+    "android": {
+        "clientName": "ANDROID",
+        "clientVersion": "19.29.37",
+        "androidSdkVersion": 30,
+        "hl": "en",
+        "gl": "US",
+    },
+    "ios": {
+        "clientName": "IOS",
+        "clientVersion": "19.29.1",
+        "deviceModel": "iPhone16,2",
+        "hl": "en",
+        "gl": "US",
+    },
+    "mweb": {
+        "clientName": "MWEB",
+        "clientVersion": "2.20240726.01.00",
+        "hl": "en",
+        "gl": "US",
+    },
+    "tv": {
+        "clientName": "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
+        "clientVersion": "2.0",
+        "hl": "en",
+        "gl": "US",
+        "thirdPartyEmbedUrl": "https://www.google.com",
+    },
+}
+
+# Cookie cache - avtomatik yangilash uchun
+_cookie_cache: Dict[str, Any] = {"cookies": None, "expires": 0}
 
 
 def _is_proxy_available() -> bool:
@@ -164,7 +214,6 @@ async def _wake_hf_space(api_url: str) -> bool:
 
                 # Agar HTML qaytarsa — Space uyg'onyapti yoki ishlamayapti
                 if body.strip().startswith("<"):
-                    import asyncio
                     logger.info("[Cobalt] HF Space uyg'onyapti, 8 sekund kutilmoqda...")
                     await asyncio.sleep(8)
 
@@ -368,6 +417,357 @@ async def _try_cobalt(url: str, quality: str = "720", audio_only: bool = False) 
 
 
 # ============================================================
+# INNERTUBE API - YouTube'ning ichki API si
+# ============================================================
+
+async def _try_innertube(video_id: str, quality: str = "720",
+                         audio_only: bool = False) -> Optional[Dict[str, Any]]:
+    """YouTube InnerTube API orqali to'g'ridan-to'g'ri video ma'lumot olish.
+
+    Bu usul yt-dlp va tashqi servislarga tayanmaydi.
+    YouTube'ning o'z ichki API siga murojaat qiladi.
+
+    InnerTube API endpoint: https://www.youtube.com/youtubei/v1/player
+    Har xil klient kontekstida (web, android, ios, mweb, tv) urinadi.
+    """
+    logger.info(f"[InnerTube] Video ID: {video_id}")
+
+    # Klientlarni sinash tartibi - tv birinchi (eng kam cheklov)
+    client_order = ["tv", "android", "ios", "mweb", "web"]
+
+    po_token = os.getenv("PO_TOKEN", "")
+
+    for client_key in client_order:
+        client_ctx = INNERTUBE_CLIENTS.get(client_key)
+        if not client_ctx:
+            continue
+
+        try:
+            result = await _innertube_player_request(video_id, client_key, client_ctx, po_token)
+            if result:
+                # Natijani tekshirish - playable bo'lishi kerak
+                playability = result.get("playabilityStatus", {})
+                status = playability.get("status", "")
+
+                if status == "OK":
+                    # Video ma'lumotlari va formatlar bor
+                    streaming_data = result.get("streamingData", {})
+                    formats = streaming_data.get("formats", [])
+                    adaptive_formats = streaming_data.get("adaptiveFormats", [])
+
+                    if formats or adaptive_formats:
+                        video_details = result.get("videoDetails", {})
+                        logger.info(
+                            f"[InnerTube] {client_key}: MUVOFAQIYATLI - "
+                            f"Formats: {len(formats)}, Adaptive: {len(adaptive_formats)}"
+                        )
+                        return {
+                            "source": "innertube",
+                            "client": client_key,
+                            "data": result,
+                            "video_id": video_id,
+                            "quality": quality,
+                            "audio_only": audio_only,
+                        }
+                    else:
+                        logger.debug(f"[InnerTube] {client_key}: Formatlar topilmadi")
+                        continue
+
+                elif status == "LOGIN_REQUIRED":
+                    reason = playability.get("reason", "")
+                    messages = playability.get("messages", [])
+                    logger.warning(
+                        f"[InnerTube] {client_key}: LOGIN_REQUIRED - "
+                        f"{reason} {' '.join(messages)[:100]}"
+                    )
+                    # PO Token bilan qayta urinish
+                    if not po_token and client_key == "web":
+                        logger.info("[InnerTube] PO_TOKEN yo'q, keyingi klientga o'tilmoqda...")
+                    continue
+
+                elif status == "UNPLAYABLE":
+                    reason = playability.get("reason", "")
+                    logger.warning(f"[InnerTube] {client_key}: UNPLAYABLE - {reason}")
+                    continue
+
+                else:
+                    reason = playability.get("reason", "Noma'lum")
+                    logger.warning(f"[InnerTube] {client_key}: {status} - {reason}")
+                    continue
+
+        except Exception as e:
+            logger.debug(f"[InnerTube] {client_key}: {str(e)[:80]}")
+            continue
+
+    logger.warning("[InnerTube] Barcha klientlar muvaffaqiyatsiz")
+    return None
+
+
+async def _innertube_player_request(video_id: str, client_key: str,
+                                     client_ctx: Dict, po_token: str = "") -> Optional[Dict]:
+    """YouTube InnerTube player API ga so'rov yuborish."""
+
+    api_url = "https://www.youtube.com/youtubei/v1/player"
+    params = {
+        "prettyPrint": "false",
+    }
+
+    # Klient kontekstini nusxalash
+    client_info = dict(client_ctx)
+
+    # PO Token qo'shish (faqat web klienti uchun)
+    if po_token and client_key == "web":
+        client_info["poToken"] = po_token
+
+    # Cookies fayldan SAPISIDHASH olish
+    sapisid = ""
+    cookies_path = os.getenv("COOKIES_FILE", "cookies.txt")
+    if os.path.exists(cookies_path):
+        try:
+            with open(cookies_path, "r") as f:
+                for line in f:
+                    if "SAPISID" in line and "youtube.com" in line and not line.startswith("#"):
+                        parts = line.strip().split("\t")
+                        if len(parts) >= 7:
+                            sapisid = parts[6].strip()
+                            break
+        except Exception:
+            pass
+
+    payload = {
+        "context": {
+            "client": client_info,
+        },
+        "videoId": video_id,
+        "contentCheckOk": True,
+        "racyCheckOk": True,
+    }
+
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        "Origin": "https://www.youtube.com",
+        "Referer": f"https://www.youtube.com/watch?v={video_id}",
+    }
+
+    # Cookie header qo'shish
+    cookie_parts = []
+    if sapisid:
+        cookie_parts.append(f"SAPISID={sapisid}")
+        # SAPISIDHASH yaratish
+        import hashlib
+        timestamp = str(int(time.time()))
+        hash_input = f"{timestamp} {sapisid} https://www.youtube.com"
+        sapisidhash = hashlib.sha1(hash_input.encode()).hexdigest()
+        headers["Authorization"] = f"SAPISIDHASH {timestamp}_{sapisidhash}"
+
+    if cookie_parts:
+        headers["Cookie"] = "; ".join(cookie_parts)
+
+    # Avval proxiesz, keyin proxy bilan
+    for use_proxy in [False, True]:
+        if use_proxy and not _is_proxy_available():
+            continue
+
+        connector = _get_proxy_connector() if use_proxy else None
+        proxy = _get_proxy_url() if use_proxy and not connector else None
+
+        try:
+            async with aiohttp.ClientSession(connector=connector) as session:
+                async with session.post(
+                    api_url,
+                    params=params,
+                    json=payload,
+                    headers=headers,
+                    proxy=proxy,
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as resp:
+                    if resp.status != 200:
+                        logger.debug(f"[InnerTube] {client_key}: HTTP {resp.status}")
+                        if use_proxy:
+                            continue
+                        return None
+
+                    data = await resp.json()
+                    return data
+
+        except aiohttp.ClientConnectorError:
+            if use_proxy:
+                _mark_proxy_broken()
+                continue
+            return None
+        except Exception as e:
+            if use_proxy:
+                continue
+            logger.debug(f"[InnerTube] {client_key} xato: {str(e)[:60]}")
+            return None
+
+    return None
+
+
+def _extract_innertube_download(data: Dict, quality: str = "720",
+                                 audio_only: bool = False) -> Tuple[Optional[str], str, Optional[Dict]]:
+    """InnerTube natijasidan eng yaxshi yuklab olish URL ini topish.
+
+    Returns:
+        (download_url, file_ext, info_dict) yoki (None, "", None)
+    """
+    streaming_data = data.get("streamingData", {})
+    video_details = data.get("videoDetails", {})
+
+    formats = streaming_data.get("formats", [])  # Combined (video+audio)
+    adaptive_formats = streaming_data.get("adaptiveFormats", [])  # Separated
+
+    if audio_only:
+        # Eng yaxshi audio formatni topish
+        audio_fmts = [f for f in adaptive_formats if f.get("mimeType", "").startswith("audio/")]
+        if not audio_fmts:
+            # Combined formatlardan foydalanish
+            audio_fmts = formats
+
+        if not audio_fmts:
+            return None, "", None
+
+        # Bitrate bo'yicha saralash
+        audio_fmts.sort(key=lambda f: int(f.get("bitrate", 0)), reverse=True)
+        best = audio_fmts[0]
+
+        url = best.get("url")
+        if not url:
+            # Cipher/signature URL ni tekshirish
+            cipher = best.get("cipher") or best.get("signatureCipher", "")
+            if cipher:
+                url = _decrypt_cipher(cipher)
+
+        if url:
+            info = _innertube_to_info(video_details, best, audio_only=True)
+            return url, "mp3", info
+
+        return None, "", None
+
+    # Video yuklash
+    target_height = int(quality.replace("p", ""))
+
+    # Combined formatlar (video+audio) - eng yaxshi tanlov
+    combined = [f for f in formats if f.get("url") or f.get("cipher") or f.get("signatureCipher")]
+    if combined:
+        # Target height ga yaqin combined formatni topish
+        best_combined = _find_closest_format(combined, target_height)
+        if best_combined:
+            url = best_combined.get("url")
+            if not url:
+                cipher = best_combined.get("cipher") or best_combined.get("signatureCipher", "")
+                if cipher:
+                    url = _decrypt_cipher(cipher)
+            if url:
+                info = _innertube_to_info(video_details, best_combined, audio_only=False)
+                return url, "mp4", info
+
+    # Adaptive formatlardan eng yaxshi videoni topish
+    video_fmts = [f for f in adaptive_formats if f.get("mimeType", "").startswith("video/")]
+    if video_fmts:
+        best_video = _find_closest_format(video_fmts, target_height)
+        if best_video:
+            url = best_video.get("url")
+            if not url:
+                cipher = best_video.get("cipher") or best_video.get("signatureCipher", "")
+                if cipher:
+                    url = _decrypt_cipher(cipher)
+            if url:
+                info = _innertube_to_info(video_details, best_video, audio_only=False)
+                return url, "mp4", info
+
+    return None, "", None
+
+
+def _find_closest_format(formats: List[Dict], target_height: int) -> Optional[Dict]:
+    """Target height ga eng yaqin formatni topish."""
+    best = None
+    best_diff = 99999
+
+    for fmt in formats:
+        height = fmt.get("height")
+        if not height:
+            # Quality label dan olish
+            quality = fmt.get("qualityLabel", "")
+            if "p" in quality:
+                try:
+                    height = int(quality.replace("p", ""))
+                except ValueError:
+                    continue
+            else:
+                continue
+
+        diff = abs(height - target_height)
+        if diff < best_diff:
+            best_diff = diff
+            best = fmt
+        elif diff == best_diff and best:
+            # Bir xil height da kattaroq bitrate tanlash
+            if int(fmt.get("bitrate", 0)) > int(best.get("bitrate", 0)):
+                best = fmt
+
+    return best
+
+
+def _decrypt_cipher(cipher_text: str) -> Optional[str]:
+    """YouTube cipher/signatureCipher dan URL ajratib olish.
+
+    Eslatma: To'liq decrypt qilish uchun YouTube JavaScript player kodini
+    tahlil qilish kerak. Bu yerda faqat URL ni ajratib olamiz.
+    Agar signature qismlari bo'lsa, ularni qayta ishlash mumkin emas
+    (player kodini talab qiladi).
+
+    Amaliy yechim: Invidious orqali proxy qilish.
+    """
+    from urllib.parse import parse_qs as _parse_qs
+
+    try:
+        params = _parse_qs(cipher_text)
+        url = params.get("url", [None])[0]
+        if url:
+            # s (signature) parametri bo'lsa, uni qo'shish
+            s = params.get("s", [None])[0]
+            sp = params.get("sp", ["signature"])[0]
+            if s:
+                # Signature bor - to'liq decrypt qilib bo'lmaydi
+                # Lekin ba'zi hollarda ishlaydi
+                import urllib.parse
+                url = f"{url}&{sp}={urllib.parse.quote(s)}"
+            return url
+    except Exception as e:
+        logger.debug(f"[Cipher] Decrypt xatosi: {e}")
+
+    return None
+
+
+def _innertube_to_info(video_details: Dict, fmt: Dict,
+                       audio_only: bool = False) -> Dict[str, Any]:
+    """InnerTube ma'lumotlarini yt-dlp info formatiga o'girish."""
+    return {
+        "id": video_details.get("videoId", ""),
+        "title": video_details.get("title", "Noma'lum"),
+        "description": video_details.get("shortDescription", ""),
+        "duration": int(video_details.get("lengthSeconds", 0)),
+        "view_count": int(video_details.get("viewCount", 0)),
+        "uploader": video_details.get("author", ""),
+        "thumbnail": video_details.get("thumbnail", {}).get("thumbnails", [{}])[-1].get("url", ""),
+        "webpage_url": f"https://www.youtube.com/watch?v={video_details.get('videoId', '')}",
+        "extractor": "youtube",
+        "formats": [{
+            "format_id": str(fmt.get("itag", "")),
+            "url": fmt.get("url", ""),
+            "ext": "mp4",
+            "height": fmt.get("height"),
+            "width": fmt.get("width"),
+            "vcodec": "none" if audio_only else "unknown",
+            "acodec": "unknown",
+            "bitrate": fmt.get("bitrate", 0),
+        }],
+    }
+
+
+# ============================================================
 # INVIDIOUS API - avval proxiesz, keyin proxy bilan
 # ============================================================
 
@@ -526,6 +926,83 @@ async def _try_piped(video_id: str, fast_only: bool = False) -> Optional[Dict[st
 
 
 # ============================================================
+# INVIDIOUS PROXY DOWNLOAD - Invidious orqali video yuklash
+# ============================================================
+
+async def _try_invidious_proxy_download(video_id: str, quality: str = "720",
+                                         audio_only: bool = False) -> Optional[Tuple[str, Dict[str, Any]]]:
+    """Invidious orqali video yuklash — Invidious o'zi proxy bo'lib ishlaydi.
+
+    Invidious /latest_version endpoint i orqali to'g'ridan-to'g'ri yuklab olish.
+    Invidious proksi sifatida ishlaydi — YouTube CDN ga o'z IP sidan murojaat qiladi.
+    Bu datacenter IP da ishlashi kerak, chunki YouTube Invidious server IP sini ko'radi.
+    """
+    instances = _FAST_INVIDIOUS[:6]
+
+    target_height = int(quality.replace("p", "")) if not audio_only else 0
+
+    for instance in instances:
+        try:
+            # Avval video ma'lumotlarini olish
+            async with aiohttp.ClientSession(headers=HEADERS) as session:
+                api_url = f"{instance}/api/v1/videos/{video_id}"
+                async with session.get(api_url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status != 200:
+                        continue
+
+                    data = await resp.json()
+
+                    if audio_only:
+                        # Audio formatni topish
+                        for fmt in data.get("adaptiveFormats", []):
+                            if fmt.get("type", "").startswith("audio") and fmt.get("url"):
+                                # Invidious local proxy URL
+                                download_url = fmt["url"]
+                                if not download_url.startswith("http"):
+                                    download_url = f"{instance}{download_url}"
+
+                                result = await _download_from_url(download_url, video_id, True, "mp3")
+                                if result:
+                                    info = _convert_invidious(data, video_id)
+                                    return result, info
+                        continue
+
+                    # Video formatni topish
+                    format_streams = data.get("formatStreams", [])
+                    best = None
+                    best_diff = 99999
+
+                    for fmt in format_streams:
+                        quality_label = fmt.get("qualityLabel", "")
+                        if not quality_label:
+                            continue
+                        try:
+                            height = int(quality_label.replace("p", ""))
+                        except ValueError:
+                            continue
+                        diff = abs(height - target_height)
+                        if diff < best_diff:
+                            best_diff = diff
+                            best = fmt
+
+                    if best and best.get("url"):
+                        download_url = best["url"]
+                        if not download_url.startswith("http"):
+                            download_url = f"{instance}{download_url}"
+
+                        result = await _download_from_url(download_url, video_id, False, "mp4")
+                        if result:
+                            info = _convert_invidious(data, video_id)
+                            return result, info
+
+        except Exception as e:
+            logger.debug(f"[Invidious-Proxy] {instance}: {str(e)[:60]}")
+            continue
+
+    return None
+
+
+# ============================================================
 # ASOSIY FUNKSIYALAR
 # ============================================================
 
@@ -534,8 +1011,9 @@ async def get_youtube_info_via_api(url: str) -> Optional[Dict[str, Any]]:
 
     STRATEGIYA:
     1. Cobalt API - o'z serverimiz, eng ishonchli
-    2. Invidious - tezkor, keyin to'liq
-    3. Piped - tezkor, keyin to'liq
+    2. InnerTube API - YouTube'ning ichki API si
+    3. Invidious - tezkor, keyin to'liq
+    4. Piped - tezkor, keyin to'liq
     """
     video_id = _extract_video_id(url)
     if not video_id:
@@ -559,24 +1037,30 @@ async def get_youtube_info_via_api(url: str) -> Optional[Dict[str, Any]]:
             "_cobalt_available": True,
         }
     else:
-        logger.info("[API] Cobalt ishlamadi, Invidious/Piped sinab ko'rilmoqda...")
+        logger.info("[API] Cobalt ishlamadi, keyingi usulga o'tilmoqda...")
 
-    # === 2-USUL: Invidious (tezkor) ===
+    # === 2-USUL: InnerTube API (YouTube ichki API) ===
+    innertube_result = await _try_innertube(video_id, "720", False)
+    if innertube_result:
+        logger.info("[API] InnerTube orqali ma'lumot olindi!")
+        return innertube_result
+
+    # === 3-USUL: Invidious (tezkor) ===
     result = await _try_invidious(video_id, fast_only=True)
     if result:
         return result
 
-    # === 3-USUL: Piped (tezkor) ===
+    # === 4-USUL: Piped (tezkor) ===
     result = await _try_piped(video_id, fast_only=True)
     if result:
         return result
 
-    # === 4-USUL: Invidious (to'liq) ===
+    # === 5-USUL: Invidious (to'liq) ===
     result = await _try_invidious(video_id, fast_only=False)
     if result:
         return result
 
-    # === 5-USUL: Piped (to'liq) ===
+    # === 6-USUL: Piped (to'liq) ===
     result = await _try_piped(video_id, fast_only=False)
     if result:
         return result
@@ -587,7 +1071,14 @@ async def get_youtube_info_via_api(url: str) -> Optional[Dict[str, Any]]:
 
 async def download_youtube_via_api(url: str, quality: str = "720",
                                     audio_only: bool = False) -> Optional[Tuple[str, Dict[str, Any]]]:
-    """YouTube videosini API orqali yuklab olish."""
+    """YouTube videosini API orqali yuklab olish.
+
+    STRATEGIYA:
+    1. Cobalt API - o'z serverimiz
+    2. InnerTube API - YouTube ichki API
+    3. Invidious proxy download - Invidious orqali proksi yuklash
+    4. Invidious/Piped API orqali yuklash
+    """
     video_id = _extract_video_id(url)
 
     # 1: COBALT
@@ -605,10 +1096,34 @@ async def download_youtube_via_api(url: str, quality: str = "720",
         else:
             logger.warning("[API] Cobalt javobida download_url yo'q")
     else:
-        logger.info("[API] Cobalt ishlamadi, Invidious/Piped sinab ko'rilmoqda...")
+        logger.info("[API] Cobalt ishlamadi, keyingi usulga o'tilmoqda...")
 
-    # 2: INVIDIOUS
-    logger.info("[API] 2-usul: Invidious orqali yuklanmoqda...")
+    # 2: INNERTUBE
+    logger.info("[API] 2-usul: InnerTube orqali yuklanmoqda...")
+    innertube_result = await _try_innertube(video_id, quality, audio_only)
+    if innertube_result:
+        download_url, file_ext, fmt_info = _extract_innertube_download(
+            innertube_result["data"], quality, audio_only
+        )
+        if download_url:
+            result = await _download_from_url(download_url, video_id, audio_only, file_ext)
+            if result:
+                info = fmt_info or _make_basic_info(url, video_id, audio_only)
+                return result, info
+            else:
+                logger.warning("[API] InnerTube URL topildi lekin yuklab bo'lmadi")
+    else:
+        logger.info("[API] InnerTube ishlamadi, keyingi usulga o'tilmoqda...")
+
+    # 3: INVIDIOUS PROXY DOWNLOAD
+    logger.info("[API] 3-usul: Invidious proxy orqali yuklanmoqda...")
+    inv_proxy_result = await _try_invidious_proxy_download(video_id, quality, audio_only)
+    if inv_proxy_result:
+        logger.info("[API] Invidious proxy orqali yuklash MUVOFAQIYATLI!")
+        return inv_proxy_result
+
+    # 4: INVIDIOUS API
+    logger.info("[API] 4-usul: Invidious orqali yuklanmoqda...")
     inv_result = await _try_invidious(video_id, fast_only=True)
     if inv_result:
         download_url, file_ext = _find_best_invidious_download(inv_result["data"], quality, audio_only)
@@ -618,8 +1133,8 @@ async def download_youtube_via_api(url: str, quality: str = "720",
                 info = convert_api_info_to_ytdlp(inv_result)
                 return result, info
 
-    # 3: PIPED
-    logger.info("[API] 3-usul: Piped orqali yuklanmoqda...")
+    # 5: PIPED
+    logger.info("[API] 5-usul: Piped orqali yuklanmoqda...")
     piped_result = await _try_piped(video_id, fast_only=True)
     if piped_result:
         download_url, file_ext = _find_best_piped_download(piped_result["data"], quality, audio_only)
@@ -669,7 +1184,7 @@ async def _download_from_url(url: str, video_id: str, audio_only: bool,
 
                         total_size = 0
                         with open(file_path, "wb") as f:
-                            async for chunk in resp.content.iter_chunked(8192):
+                            async for chunk in resp.content.iter_chunked(65536):  # 64KB — tezroq
                                 total_size += len(chunk)
                                 if total_size > max_size:
                                     logger.error(f"[API] Fayl juda katta: {total_size / 1024 / 1024:.1f}MB")
@@ -820,6 +1335,21 @@ def convert_api_info_to_ytdlp(api_result: Dict[str, Any]) -> Dict[str, Any]:
             video_id,
             False
         )
+    elif source == "innertube":
+        # InnerTube ma'lumotlarini konvertatsiya qilish
+        video_details = data.get("videoDetails", {})
+        return {
+            "id": video_id,
+            "title": video_details.get("title", "Noma'lum"),
+            "description": video_details.get("shortDescription", ""),
+            "duration": int(video_details.get("lengthSeconds", 0)),
+            "view_count": int(video_details.get("viewCount", 0)),
+            "uploader": video_details.get("author", ""),
+            "thumbnail": video_details.get("thumbnail", {}).get("thumbnails", [{}])[-1].get("url", ""),
+            "webpage_url": f"https://www.youtube.com/watch?v={video_id}",
+            "extractor": "youtube",
+            "formats": [],
+        }
     elif source == "invidious":
         return _convert_invidious(data, video_id)
     else:

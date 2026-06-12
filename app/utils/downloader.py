@@ -2,6 +2,7 @@ import os
 import logging
 import re
 import shutil
+import subprocess
 import tempfile
 import time
 from typing import Optional, Dict, Any, Tuple, List
@@ -15,6 +16,10 @@ logger = logging.getLogger(__name__)
 
 # Module-level cookies path cache
 _cookies_path: Optional[str] = None
+
+# Bot detection xatosi sanagichi — agar barcha usullar shu xatoni bersa, keyin o'tkazib yuborish
+_bot_detection_count = 0
+_bot_detection_threshold = 3  # 3 marta bot detektsiyadan keyin yt-dlp urinishlarini o'tkazib yuborish
 
 try:
     _yt_dlp_version = yt_dlp.version.__version__
@@ -180,6 +185,26 @@ def log_cookies_status() -> None:
     else:
         logger.error("[COOKIES] COOKIE FAYL YO'Q!")
 
+    # PO Token holatini tekshirish
+    po_token = os.getenv("PO_TOKEN", "")
+    if po_token:
+        logger.info(f"[PO_TOKEN] Mavjud ({len(po_token)} belgi)")
+    else:
+        logger.warning("[PO_TOKEN] O'RNATILMAGAN! YouTube bot detektsiyasini chetlab o'tish uchun kerak.")
+
+
+def _is_bot_detection_error(error: Exception) -> bool:
+    """Xato bot detektsiya bilan bog'liq ekanligini tekshirish."""
+    err_str = str(error).lower()
+    bot_keywords = [
+        "sign in to confirm",
+        "not a bot",
+        "bot detection",
+        "captcha",
+        "age verification",
+    ]
+    return any(kw in err_str for kw in bot_keywords)
+
 
 def detect_platform(url: str) -> Optional[str]:
     try:
@@ -241,6 +266,11 @@ def _build_base_opts(use_cookies: bool = True) -> Dict[str, Any]:
         cookies_path = _find_cookies_file()
         if cookies_path:
             opts["cookiefile"] = cookies_path
+
+    # PO Token qo'shish
+    po_token = os.getenv("PO_TOKEN", "")
+    if po_token:
+        opts.setdefault("extractor_args", {}).setdefault("youtube", {})["po_token"] = f"web+{po_token}"
 
     return opts
 
@@ -637,7 +667,60 @@ async def _download_media_url(session, media_url: str, prefix: str, ext: str) ->
 
 
 # ============================================================
-# YOUTUBE: Asosiy strategiya - avval Invidious/Piped API
+# COOKIE AUTO-GENERATION via yt-session-generator
+# ============================================================
+
+async def _auto_generate_cookies() -> Optional[str]:
+    """YouTube cookie'larini avtomatik generatsiya qilish.
+
+    yt-session-generator yordamida yangi cookie'lar yaratish.
+    Agar yt-session-generator o'rnatilmagan bo'lsa, None qaytaradi.
+
+    MUHIM: Bu funksiya faqat cookie'lar yo'q yoki eskirgan bo'lsa ishlaydi.
+    """
+    global _cookies_path
+
+    # yt-session-generator mavjudligini tekshirish
+    generator_url = os.getenv("YT_SESSION_GENERATOR_URL", "")
+    if not generator_url:
+        logger.debug("[Cookie-Gen] YT_SESSION_GENERATOR_URL o'rnatilmagan")
+        return None
+
+    try:
+        import aiohttp
+        logger.info(f"[Cookie-Gen] yt-session-generator ga so'rov yuborilmoqda: {generator_url}")
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{generator_url.rstrip('/')}/generate",
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                if resp.status != 200:
+                    logger.warning(f"[Cookie-Gen] Generator javob bermadi: HTTP {resp.status}")
+                    return None
+
+                data = await resp.json()
+                cookies_text = data.get("cookies", "")
+                if not cookies_text:
+                    logger.warning("[Cookie-Gen] Generator cookie qaytarmadi")
+                    return None
+
+                # Cookie'larni faylga yozish
+                cookies_path = os.path.join(tempfile.gettempdir(), "yt_generated_cookies.txt")
+                with open(cookies_path, "w") as f:
+                    f.write(cookies_text)
+
+                _cookies_path = cookies_path
+                logger.info(f"[Cookie-Gen] Yangi cookie'lar generatsiya qilindi: {cookies_path}")
+                return cookies_path
+
+    except Exception as e:
+        logger.warning(f"[Cookie-Gen] Xato: {e}")
+        return None
+
+
+# ============================================================
+# YOUTUBE: Asosiy strategiya - avval API, keyin yt-dlp
 # ============================================================
 
 async def extract_video_info(url: str) -> Optional[Dict[str, Any]]:
@@ -656,9 +739,12 @@ async def _extract_youtube_info(url: str) -> Optional[Dict[str, Any]]:
 
     STRATEGIYA:
     1. Cobalt API - tez va ishonchli (o'z serverimiz)
-    2. Invidious/Piped API - alternative frontendlar
-    3. yt-dlp (1 urinish) - oxirgi chora
+    2. InnerTube API - YouTube'ning ichki API si
+    3. Invidious/Piped API - alternative frontendlar
+    4. yt-dlp (1-2 urinish) - oxirgi chora, faqat PO Token bilan
     """
+    global _bot_detection_count
+
     from app.utils.youtube_api import _extract_video_id
 
     video_id = _extract_video_id(url)
@@ -699,7 +785,20 @@ async def _extract_youtube_info(url: str) -> Optional[Dict[str, Any]]:
     else:
         logger.info("[YouTube] COBALT_API_URL o'rnatilmagan, Cobalt o'tkazib yuborildi")
 
-    # === 2-BOSQICH: Invidious/Piped API ===
+    # === 2-BOSQICH: InnerTube API (YouTube ichki API) ===
+    logger.info("[YouTube] InnerTube API orqali tekshirilmoqda...")
+    try:
+        from app.utils.youtube_api import _try_innertube, convert_api_info_to_ytdlp
+        innertube_result = await _try_innertube(video_id, "720", False)
+        if innertube_result:
+            info = convert_api_info_to_ytdlp(innertube_result)
+            if info:
+                logger.info("[YouTube] InnerTube orqali MUVOFAQIYATLI!")
+                return info
+    except Exception as e:
+        logger.warning(f"[YouTube] InnerTube xatosi: {e}")
+
+    # === 3-BOSQICH: Invidious/Piped API ===
     logger.info("[YouTube] API orqali ma'lumot olinmoqda...")
     try:
         from app.utils.youtube_api import get_youtube_info_via_api, convert_api_info_to_ytdlp
@@ -715,21 +814,25 @@ async def _extract_youtube_info(url: str) -> Optional[Dict[str, Any]]:
     except Exception as e:
         logger.warning(f"[YouTube] API xatosi: {e}")
 
-    # === 3-BOSQICH: yt-dlp — ko'plab player_client sinash ===
-    logger.info("[YouTube] yt-dlp sinab ko'rilmoqda (ko'plab player_client)...")
+    # === 4-BOSQICH: yt-dlp — faqat PO Token bilan yoki 1-2 marta ===
+    # Bot detektsiyasi juda ko'p bo'lsa, yt-dlp urinishlarini o'tkazib yuborish
+    if _bot_detection_count >= _bot_detection_threshold:
+        logger.warning(f"[YouTube] yt-dlp o'tkazib yuborildi (bot detektsiya: {_bot_detection_count} marta)")
+        return None
+
+    po_token = os.getenv("PO_TOKEN", "")
+    logger.info(f"[YouTube] yt-dlp sinab ko'rilmoqda (PO Token: {'bor' if po_token else 'yo\'q'})...")
     cookies_path = _find_cookies_file()
 
+    # PO Token bilan 1-urinish, keyin cookiesiz 1-urinish
     player_clients = []
+    if po_token:
+        # PO Token bor — web klient bilan ishlashi kerak
+        player_clients.append(("po_token+web", {}))
     if cookies_path:
-        player_clients.extend([
-            ("cookies+tv",   {"youtube": {"player_client": ["tv_embedded"]}}),
-            ("cookies+ios",  {"youtube": {"player_client": ["ios"]}}),
-            ("cookies+mweb", {"youtube": {"player_client": ["mweb"]}}),
-        ])
+        player_clients.append(("cookies+ios", {"youtube": {"player_client": ["ios"]}}))
     player_clients.extend([
         ("ios",     {"youtube": {"player_client": ["ios"]}}),
-        ("mweb",    {"youtube": {"player_client": ["mweb"]}}),
-        ("android", {"youtube": {"player_client": ["android"]}}),
     ])
 
     for label, extractor_args in player_clients:
@@ -743,9 +846,17 @@ async def _extract_youtube_info(url: str) -> Optional[Dict[str, Any]]:
                 "noplaylist": True,
                 "geo_bypass": "US",
                 "geo_bypass_country": "US",
-                "socket_timeout": 10,
-                "extractor_args": extractor_args,
+                "socket_timeout": 8,
             }
+
+            # PO Token qo'shish
+            if po_token:
+                opts.setdefault("extractor_args", {}).setdefault("youtube", {})["po_token"] = f"web+{po_token}"
+
+            if extractor_args:
+                # Merge extractor_args
+                for key, val in extractor_args.items():
+                    opts.setdefault("extractor_args", {}).setdefault(key, {}).update(val)
 
             if use_cookies:
                 opts["cookiefile"] = cookies_path
@@ -758,10 +869,16 @@ async def _extract_youtube_info(url: str) -> Optional[Dict[str, Any]]:
                     formats = info.get("formats", [])
                     if _has_video_audio(formats):
                         logger.info(f"[YouTube] yt-dlp MUVOFAQIYATLI: {label}")
+                        _bot_detection_count = max(0, _bot_detection_count - 1)  # Muvaffaqiyat — hisobni kamaytirish
                         return info
 
         except Exception as e:
-            logger.debug(f"[YouTube] yt-dlp {label}: {str(e)[:80]}")
+            err_str = str(e)
+            if _is_bot_detection_error(e):
+                _bot_detection_count += 1
+                logger.debug(f"[YouTube] yt-dlp {label}: Bot detektsiya")
+            else:
+                logger.debug(f"[YouTube] yt-dlp {label}: {err_str[:80]}")
             continue
 
     logger.error("[YouTube] Barcha usullar muvaffaqiyatsiz")
@@ -886,14 +1003,18 @@ async def _download_youtube(url: str, quality: str = "720",
                              audio_only: bool = False) -> Optional[Tuple[str, Dict[str, Any]]]:
     """YouTube videosini yuklab olish.
 
-    STRATEGIYA:
+    STRATEGIYA (yangilangan):
     1. Cobalt API (o'z serverimiz) - eng tez va ishonchli
-    2. Invidious/Piped API - alternative
-    3. yt-dlp - oxirgi chora
+    2. InnerTube API (YouTube ichki API) - to'g'ridan-to'g'ri
+    3. Invidious/Piped API - alternative frontendlar
+    4. yt-dlp - oxirgi chora, PO Token bilan
 
     Eslatma: Datacenter IP (Render, Heroku) da YouTube bloklaydi.
-    O'z Cobalt serveringizni ishga tushiring va COBALT_API_URL qo'shing.
+    PO_TOKEN o'rnatish — eng samarali yechim!
+    Yoki o'z Cobalt serveringizni ishga tushiring va COBALT_API_URL qo'shing.
     """
+    global _bot_detection_count
+
     # === 1-BOSQICH: Cobalt API (o'z serverimiz) ===
     cobalt_api_url = os.getenv("COBALT_API_URL", "")
     if cobalt_api_url:
@@ -917,7 +1038,33 @@ async def _download_youtube(url: str, quality: str = "720",
     else:
         logger.info("[YouTube] COBALT_API_URL o'rnatilmagan, Cobalt o'tkazib yuborildi")
 
-    # === 2-BOSQICH: Invidious/Piped API ===
+    # === 2-BOSQICH: InnerTube API ===
+    logger.info("[YouTube] InnerTube API orqali yuklanmoqda...")
+    try:
+        from app.utils.youtube_api import (
+            _try_innertube, _extract_innertube_download,
+            _download_from_url, _make_basic_info, _extract_video_id
+        )
+        video_id = _extract_video_id(url)
+        innertube_result = await _try_innertube(video_id, quality, audio_only)
+        if innertube_result:
+            download_url, file_ext, fmt_info = _extract_innertube_download(
+                innertube_result["data"], quality, audio_only
+            )
+            if download_url:
+                result = await _download_from_url(download_url, video_id, audio_only, file_ext)
+                if result:
+                    info = fmt_info or _make_basic_info(url, video_id, audio_only)
+                    logger.info("[YouTube] InnerTube orqali yuklash MUVOFAQIYATLI!")
+                    return result, info
+                else:
+                    logger.warning("[YouTube] InnerTube URL topildi lekin yuklab bo'lmadi")
+            else:
+                logger.warning("[YouTube] InnerTube dan URL ajratib bo'lmadi (cipher kerak)")
+    except Exception as e:
+        logger.warning(f"[YouTube] InnerTube yuklash xatosi: {e}")
+
+    # === 3-BOSQICH: Invidious/Piped API (youtube_api.py dagi) ===
     logger.info("[YouTube] API orqali yuklanmoqda (Invidious/Piped)...")
     try:
         from app.utils.youtube_api import download_youtube_via_api
@@ -928,23 +1075,30 @@ async def _download_youtube(url: str, quality: str = "720",
     except Exception as e:
         logger.warning(f"[YouTube] API yuklash xatosi: {e}")
 
-    # === 3-BOSQICH: yt-dlp orqali yuklash — ko'plab player_client sinash ===
+    # === 4-BOSQICH: yt-dlp orqali yuklash ===
+    # Bot detektsiyasi juda ko'p bo'lsa, yt-dlp urinishlarini o'tkazib yuborish
+    if _bot_detection_count >= _bot_detection_threshold:
+        logger.warning(
+            f"[YouTube] yt-dlp o'tkazib yuborildi (bot detektsiya: {_bot_detection_count} marta). "
+            f"PO_TOKEN o'rnatishni yoki residential proxy ishlatishni tavsiya etamiz."
+        )
+        return None
+
+    po_token = os.getenv("PO_TOKEN", "")
     cookies_path = _find_cookies_file()
     output_path = tempfile.mkdtemp()
 
-    # Turli player_client lar bilan sinash — ba'zilari datacenter IP da ishlashi mumkin
+    # PO Token bilan urinish — eng ishonchli
+    # Keyin faqat 1-2 marta cookiesiz urinish
     player_clients = []
+
+    if po_token:
+        # PO Token + web klient — eng ishonchli
+        player_clients.append(("po_token+web", {}))
     if cookies_path:
-        player_clients.extend([
-            ("cookies+tv",    {"youtube": {"player_client": ["tv_embedded"]}}),
-            ("cookies+ios",   {"youtube": {"player_client": ["ios"]}}),
-            ("cookies+mweb",  {"youtube": {"player_client": ["mweb"]}}),
-        ])
-    player_clients.extend([
-        ("ios",      {"youtube": {"player_client": ["ios"]}}),
-        ("mweb",     {"youtube": {"player_client": ["mweb"]}}),
-        ("android",  {"youtube": {"player_client": ["android"]}}),
-    ])
+        player_clients.append(("cookies+ios", {"youtube": {"player_client": ["ios"]}}))
+    # Faqat 1 marta cookiesiz urinish (ko'p urinish behuda)
+    player_clients.append(("ios", {"youtube": {"player_client": ["ios"]}}))
 
     for i, (label, extractor_args) in enumerate(player_clients):
         use_cookies = "cookies" in label
@@ -952,10 +1106,18 @@ async def _download_youtube(url: str, quality: str = "720",
             logger.info(f"[YouTube] yt-dlp yuklash {i+1}/{len(player_clients)}: {label}")
 
             opts = _build_download_opts(output_path, quality, audio_only, use_cookies, "best")
-            opts["extractor_args"] = extractor_args
             opts["geo_bypass"] = "US"
             opts["geo_bypass_country"] = "US"
-            opts["socket_timeout"] = 10
+            opts["socket_timeout"] = 8
+
+            # PO Token qo'shish
+            if po_token:
+                opts.setdefault("extractor_args", {}).setdefault("youtube", {})["po_token"] = f"web+{po_token}"
+
+            if extractor_args:
+                # Merge extractor_args
+                for key, val in extractor_args.items():
+                    opts.setdefault("extractor_args", {}).setdefault(key, {}).update(val)
 
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=True)
@@ -991,6 +1153,7 @@ async def _download_youtube(url: str, quality: str = "720",
                     return None
 
                 logger.info(f"[YouTube] yt-dlp yuklash MUVOFAQIYATLI: {label}")
+                _bot_detection_count = max(0, _bot_detection_count - 1)  # Muvaffaqiyat — hisobni kamaytirish
                 return file_path, info
 
         except Exception as e:
@@ -998,6 +1161,11 @@ async def _download_youtube(url: str, quality: str = "720",
             if "MaxDownloads" in str(type(e).__name__) or "MaxDownloads" in err_str:
                 logger.warning("[YouTube] Fayl hajmi cheklovdan oshdi")
                 return None
+            if _is_bot_detection_error(e):
+                _bot_detection_count += 1
+                logger.warning(f"[YouTube] yt-dlp {label}: Bot detektsiya (jami: {_bot_detection_count})")
+                # Bot detektsiyasi bo'lsa, keyingi klientlarni ham o'tkazib yuborish
+                break  # Boshqa klientlar ham ishlamaydi
             logger.warning(f"[YouTube] yt-dlp {label}: {err_str[:80]}")
             continue
 
