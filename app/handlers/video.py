@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import subprocess
@@ -31,7 +32,7 @@ _url_cache: Dict[str, dict] = {}
 _CACHE_TTL = 1800  # 30 daqiqa
 
 # Bot username
-_BOT_LINK = "@Otiribsanmi_bot"
+_BOT_LINK = "@Otiribsanmi-bot"
 
 
 def _ensure_mp4(file_path: str, force_reencode: bool = False) -> str:
@@ -42,6 +43,25 @@ def _ensure_mp4(file_path: str, force_reencode: bool = False) -> str:
     ext = os.path.splitext(file_path)[1].lower()
 
     if ext == ".mp4" and not force_reencode:
+        # MP4 fayl allaqachon mos — tezkor kodek tekshirish
+        if config.download.ffmpeg_available:
+            try:
+                probe = subprocess.run(
+                    ["ffprobe", "-v", "quiet", "-print_format", "json",
+                     "-show_streams", file_path],
+                    capture_output=True, timeout=5
+                )
+                if probe.returncode == 0:
+                    import json
+                    streams = json.loads(probe.stdout).get("streams", [])
+                    vcodec = next((s.get("codec_name", "") for s in streams if s.get("codec_type") == "video"), "")
+                    acodec = next((s.get("codec_name", "") for s in streams if s.get("codec_type") == "audio"), "")
+                    # H.264 + AAC = Telegram uchun tayyor, qayta kodlash shart emas
+                    if vcodec == "h264" and acodec in ("aac", "mp4a"):
+                        logger.info("[Video] H.264+AAC — qayta kodlash shart emas")
+                        return file_path
+            except Exception:
+                pass  # ffprobe ishlamasa, faylni qaytarib yuboramiz
         return file_path
 
     if not config.download.ffmpeg_available:
@@ -64,10 +84,11 @@ def _ensure_mp4(file_path: str, force_reencode: bool = False) -> str:
              "-c:a", "aac",
              "-movflags", "+faststart",
              "-preset", "ultrafast",
-             "-crf", "30",
+             "-crf", "28",
              "-pix_fmt", "yuv420p",
+             "-threads", "2",
              "-y", new_path],
-            capture_output=True, timeout=60
+            capture_output=True, timeout=45
         )
 
         if result.returncode == 0 and os.path.exists(new_path) and os.path.getsize(new_path) > 0:

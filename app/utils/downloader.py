@@ -229,10 +229,12 @@ def _build_base_opts(use_cookies: bool = True) -> Dict[str, Any]:
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
-        "socket_timeout": 15,
+        "socket_timeout": 10,
         "retries": 1,
         "fragment_retries": 1,
         "file_access_retries": 1,
+        "throttledratelimit": 0,
+        "concurrent_fragment_downloads": 4,
     }
 
     if use_cookies:
@@ -532,7 +534,7 @@ async def _download_story_item(session, item: dict, username: str) -> Optional[T
                         logger.error(f"[IG-API] Video yuklash xatosi: status={resp.status}")
                         return None
                     with open(file_path, "wb") as f:
-                        async for chunk in resp.content.iter_chunked(8192):
+                        async for chunk in resp.content.iter_chunked(65536):  # 64KB — tezroq
                             f.write(chunk)
 
             file_size = os.path.getsize(file_path)
@@ -577,7 +579,7 @@ async def _download_story_item(session, item: dict, username: str) -> Optional[T
                         logger.error(f"[IG-API] Rasm yuklash xatosi: status={resp.status}")
                         return None
                     with open(file_path, "wb") as f:
-                        async for chunk in resp.content.iter_chunked(8192):
+                        async for chunk in resp.content.iter_chunked(65536):  # 64KB — tezroq
                             f.write(chunk)
 
             file_size = os.path.getsize(file_path)
@@ -611,7 +613,7 @@ async def _download_media_url(session, media_url: str, prefix: str, ext: str) ->
                 logger.error(f"[IG-DL] Media yuklash xatosi: status={resp.status}")
                 return None
             with open(file_path, "wb") as f:
-                async for chunk in resp.content.iter_chunked(8192):
+                async for chunk in resp.content.iter_chunked(65536):  # 64KB — tezroq
                     f.write(chunk)
 
         file_size = os.path.getsize(file_path)
@@ -995,18 +997,29 @@ async def _download_non_youtube(url: str, quality: str, audio_only: bool) -> Opt
     cookies_path = _find_cookies_file()
     is_story = platform == "instagram" and _is_instagram_story(url)
 
-    # === INSTAGRAM STORY: 1 marta yt-dlp + API fallback ===
+    # === INSTAGRAM STORY: API birinchi (tezroq), keyin yt-dlp fallback ===
     if is_story and cookies_path:
         ig_validation = _validate_instagram_cookies(cookies_path)
 
         if ig_validation["valid"]:
-            # 1-urinish: yt-dlp (faqat 1 marta, tez)
+            # 1-urinish: Instagram API (to'g'ridan-to'g'ri — eng tez)
+            logger.info(f"[{platform}] Story: API orqali yuklanmoqda (tez)...")
+            try:
+                api_result = await _download_instagram_story_api(url, cookies_path)
+                if api_result:
+                    logger.info(f"[{platform}] Story API MUVOFAQIYATLI!")
+                    return api_result
+            except Exception as e:
+                logger.warning(f"[{platform}] Story API xato: {e}")
+
+            # 2-urinish: yt-dlp (faqat 1 marta, API ishlamasa)
             output_path = tempfile.mkdtemp()
             try:
                 opts = _build_download_opts(output_path, quality, audio_only, True, "best")
                 opts["extractor_args"] = {"instagram": {"api": ["graphql"]}}
+                opts["socket_timeout"] = 8
 
-                logger.info(f"[{platform}] Story: yt-dlp urinish...")
+                logger.info(f"[{platform}] Story: yt-dlp fallback...")
 
                 with yt_dlp.YoutubeDL(opts) as ydl:
                     info = ydl.extract_info(url, download=True)
@@ -1030,16 +1043,6 @@ async def _download_non_youtube(url: str, quality: str, audio_only: bool) -> Opt
             except Exception as e:
                 logger.warning(f"[{platform}] Story yt-dlp xato: {str(e)[:80]}")
 
-            # 2-urinish: Instagram API (to'g'ridan-to'g'ri)
-            logger.info(f"[{platform}] Story: API fallback...")
-            try:
-                api_result = await _download_instagram_story_api(url, cookies_path)
-                if api_result:
-                    logger.info(f"[{platform}] Story API MUVOFAQIYATLI!")
-                    return api_result
-            except Exception as e:
-                logger.error(f"[{platform}] Story API xato: {e}")
-
             raise LoginRequiredError("instagram", "story", ig_validation.get("missing", []))
 
         else:
@@ -1049,16 +1052,17 @@ async def _download_non_youtube(url: str, quality: str, audio_only: bool) -> Opt
     elif is_story and not cookies_path:
         raise LoginRequiredError("instagram", "story", ["sessionid", "ds_user_id", "csrftoken"])
 
-    # === ODDIY (STORY BO'LMAGAN) YUKLASH — faqat 2 urinish ===
+    # === ODDIY (STORY BO'LMAGAN) YUKLASH — faqat 1-2 urinish, tez ===
+    output_path = tempfile.mkdtemp()  # Bitta temp dir — qayta ishlatamiz
     attempts = []
     if cookies_path:
         attempts.append((True, "best"))          # 1: cookies + best
     attempts.append((False, "best"))              # 2: cookiesiz + best
 
     for i, (use_cookies, fmt_override) in enumerate(attempts, 1):
-        output_path = tempfile.mkdtemp()
         try:
             opts = _build_download_opts(output_path, quality, audio_only, use_cookies, fmt_override)
+            opts["socket_timeout"] = 8
 
             label = "cookies" if use_cookies else "cookiesiz"
             logger.info(f"[{platform}] Yuklash {i}/{len(attempts)}: {label}")
