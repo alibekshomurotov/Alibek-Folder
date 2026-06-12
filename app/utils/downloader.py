@@ -799,10 +799,11 @@ async def _extract_youtube_info(url: str) -> Optional[Dict[str, Any]]:
         logger.warning(f"[YouTube] InnerTube xatosi: {e}")
 
     # === 3-BOSQICH: Invidious/Piped API ===
+    # Cobalt va InnerTube allaqachon yuqorida sinab ko'rildi — takroriy so'rovlarni o'tkazib yuboramiz
     logger.info("[YouTube] API orqali ma'lumot olinmoqda...")
     try:
         from app.utils.youtube_api import get_youtube_info_via_api, convert_api_info_to_ytdlp
-        api_result = await get_youtube_info_via_api(url)
+        api_result = await get_youtube_info_via_api(url, skip_cobalt=True, skip_innertube=True)
         if api_result:
             info = convert_api_info_to_ytdlp(api_result)
             formats = info.get("formats", [])
@@ -1003,11 +1004,10 @@ async def _download_youtube(url: str, quality: str = "720",
                              audio_only: bool = False) -> Optional[Tuple[str, Dict[str, Any]]]:
     """YouTube videosini yuklab olish.
 
-    STRATEGIYA (yangilangan):
-    1. Cobalt API (o'z serverimiz) - eng tez va ishonchli
-    2. InnerTube API (YouTube ichki API) - to'g'ridan-to'g'ri
-    3. Invidious/Piped API - alternative frontendlar
-    4. yt-dlp - oxirgi chora, PO Token bilan
+    STRATEGIYA (yangilangan — takroriy so'rovlarsiz):
+    1. API usullari: Cobalt → InnerTube → Invidious proxy → Invidious → Piped
+       (barchasi youtube_api.py download_youtube_via_api da boshqariladi)
+    2. yt-dlp — oxirgi chora, PO Token bilan
 
     Eslatma: Datacenter IP (Render, Heroku) da YouTube bloklaydi.
     PO_TOKEN o'rnatish — eng samarali yechim!
@@ -1015,67 +1015,20 @@ async def _download_youtube(url: str, quality: str = "720",
     """
     global _bot_detection_count
 
-    # === 1-BOSQICH: Cobalt API (o'z serverimiz) ===
-    cobalt_api_url = os.getenv("COBALT_API_URL", "")
-    if cobalt_api_url:
-        logger.info(f"[YouTube] Cobalt orqali yuklanmoqda: {cobalt_api_url}")
-        try:
-            from app.utils.youtube_api import _try_cobalt, _download_from_url, _make_basic_info, _extract_video_id
-            cobalt_result = await _try_cobalt(url, quality, audio_only)
-            if cobalt_result and cobalt_result.get("download_url"):
-                video_id = _extract_video_id(url)
-                result = await _download_from_url(cobalt_result["download_url"], video_id, audio_only)
-                if result:
-                    info = _make_basic_info(url, video_id, audio_only)
-                    logger.info("[YouTube] Cobalt orqali yuklash MUVOFAQIYATLI!")
-                    return result, info
-                else:
-                    logger.warning("[YouTube] Cobalt URL topildi lekin yuklab bo'lmadi")
-            else:
-                logger.info("[YouTube] Cobalt javob bermadi, keyingi usulga o'tilmoqda...")
-        except Exception as e:
-            logger.warning(f"[YouTube] Cobalt yuklash xatosi: {e}")
-    else:
-        logger.info("[YouTube] COBALT_API_URL o'rnatilmagan, Cobalt o'tkazib yuborildi")
-
-    # === 2-BOSQICH: InnerTube API ===
-    logger.info("[YouTube] InnerTube API orqali yuklanmoqda...")
-    try:
-        from app.utils.youtube_api import (
-            _try_innertube, _extract_innertube_download,
-            _download_from_url, _make_basic_info, _extract_video_id
-        )
-        video_id = _extract_video_id(url)
-        innertube_result = await _try_innertube(video_id, quality, audio_only)
-        if innertube_result:
-            download_url, file_ext, fmt_info = _extract_innertube_download(
-                innertube_result["data"], quality, audio_only
-            )
-            if download_url:
-                result = await _download_from_url(download_url, video_id, audio_only, file_ext)
-                if result:
-                    info = fmt_info or _make_basic_info(url, video_id, audio_only)
-                    logger.info("[YouTube] InnerTube orqali yuklash MUVOFAQIYATLI!")
-                    return result, info
-                else:
-                    logger.warning("[YouTube] InnerTube URL topildi lekin yuklab bo'lmadi")
-            else:
-                logger.warning("[YouTube] InnerTube dan URL ajratib bo'lmadi (cipher kerak)")
-    except Exception as e:
-        logger.warning(f"[YouTube] InnerTube yuklash xatosi: {e}")
-
-    # === 3-BOSQICH: Invidious/Piped API (youtube_api.py dagi) ===
-    logger.info("[YouTube] API orqali yuklanmoqda (Invidious/Piped)...")
+    # === 1-BOSQICH: API usullari (Cobalt → InnerTube → Invidious → Piped) ===
+    # Bitta funktsiya orqali — takroriy so'rovlarsiz!
+    logger.info("[YouTube] API usullari sinab ko'rilmoqda...")
     try:
         from app.utils.youtube_api import download_youtube_via_api
-        result = await download_youtube_via_api(url, quality, audio_only)
+        result = await download_youtube_via_api(url, quality, audio_only,
+                                                 skip_cobalt=False, skip_innertube=False)
         if result:
             logger.info("[YouTube] API orqali yuklash MUVOFAQIYATLI!")
             return result
     except Exception as e:
         logger.warning(f"[YouTube] API yuklash xatosi: {e}")
 
-    # === 4-BOSQICH: yt-dlp orqali yuklash ===
+    # === 2-BOSQICH: yt-dlp orqali yuklash ===
     # Bot detektsiyasi juda ko'p bo'lsa, yt-dlp urinishlarini o'tkazib yuborish
     if _bot_detection_count >= _bot_detection_threshold:
         logger.warning(
