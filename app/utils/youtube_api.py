@@ -1,14 +1,4 @@
-"""YouTube alternative downloader using Cobalt, Invidious, Piped APIs.
-
-Cobalt (cobalt.tools) - eng ishonchli, maxsus YouTube yuklash uchun yaratilgan.
-Invidious/Piped - alternative YouTube frontendlar.
-
-MUHIM: YOUTUBE_PROXY env orqali SOCKS5/HTTP proxy berish mumkin.
-Bu Render kabi datacenter IP larda YouTube yuklash uchun kerak.
-
-MUHIM: Agar proxy buzilgan bo'lsa, kod avtomatik proxiesz urinadi!
-"""
-
+import json
 import logging
 import os
 import tempfile
@@ -121,7 +111,7 @@ def _mark_proxy_broken():
     global _proxy_broken
     if not _proxy_broken:
         _proxy_broken = True
-        logger.warning(f"[Proxy] Proxy ishlamadi, endi proxiesz ishlatamiz!")
+        logger.warning("[Proxy] Proxy ishlamadi, endi proxiesz ishlatamiz!")
 
 
 def _extract_video_id(url: str) -> Optional[str]:
@@ -204,7 +194,13 @@ async def _wake_hf_space(api_url: str) -> bool:
 
 
 async def _try_cobalt(url: str, quality: str = "720", audio_only: bool = False) -> Optional[Dict[str, Any]]:
-    """Cobalt API orqali video yuklab olish."""
+    """Cobalt API orqali video yuklab olish.
+
+    Cobalt v11 API:
+    - POST / (root) — Accept: application/json VA Content-Type: application/json SHART
+    - Muvaffaqiyat: {"status":"redirect","url":"..."} yoki {"status":"tunnel","url":"/tunnel?..."}
+    - Xato: {"status":"error","error":{"code":"error.api.fetch.fail","context":{...}}}
+    """
     # Har safar env dan o'qish (modul yuklanganda emas)
     api_url = os.getenv("COBALT_API_URL", "")
     api_key = os.getenv("COBALT_API_KEY", "")
@@ -264,6 +260,8 @@ async def _try_cobalt(url: str, quality: str = "720", audio_only: bool = False) 
                 proxy=proxy,
                 timeout=aiohttp.ClientTimeout(total=30),
             ) as resp:
+                # Avval text o'qymiz — logging va HTML tekshirish uchun
+                # Keyin json.loads() bilan parse qilamiz (resp.json() ishlamaydi text dan keyin)
                 body = await resp.text()
                 logger.info(f"[Cobalt] POST {endpoint} → HTTP {resp.status} - {body[:300]}")
 
@@ -276,14 +274,16 @@ async def _try_cobalt(url: str, quality: str = "720", audio_only: bool = False) 
                     logger.error("[Cobalt] 401 — API_KEY kerak! HF Space va Render ga qo'shing.")
                     return None
 
-                if resp.status != 200:
-                    logger.warning(f"[Cobalt] HTTP {resp.status}")
-                    return None
-
+                # Cobalt v11: xatolar ham JSON qaytaradi (HTTP 400)
+                # body ni json.loads bilan parse qilamiz
                 try:
-                    data = await resp.json()
+                    data = json.loads(body)
                 except Exception:
-                    logger.warning("[Cobalt] JSON parse xatosi")
+                    # JSON parse bo'lmadi
+                    if resp.status != 200:
+                        logger.warning(f"[Cobalt] HTTP {resp.status} (JSON emas)")
+                    else:
+                        logger.warning("[Cobalt] JSON parse xatosi")
                     return None
 
                 status = data.get("status", "")
@@ -692,7 +692,7 @@ async def _download_from_url(url: str, video_id: str, audio_only: bool,
                 if use_proxy:
                     _mark_proxy_broken()
                     continue
-                logger.error(f"[API] Ulanish xatosi")
+                logger.error("[API] Ulanish xatosi")
                 return None
             except Exception as e:
                 if use_proxy:
