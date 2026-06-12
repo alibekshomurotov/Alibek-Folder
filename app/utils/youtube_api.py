@@ -154,34 +154,35 @@ async def _wake_hf_space(api_url: str) -> bool:
 
     HF Space bepul rejimida 5 daqiqadan keyin uxlaydi.
     Uyg'otish uchun GET so'rov yuboramiz va API tayyor bo'lishini kutamiz.
+    Cobalt v11+: GET / → serverInfo JSON qaytaradi
     """
     if ".hf.space" not in api_url:
         return True  # HF Space emas, uyg'otish shart emas
 
     try:
-        logger.info(f"[Cobalt] HF Space uyg'otilmoqda...")
+        logger.info("[Cobalt] HF Space uyg'otilmoqda...")
         async with aiohttp.ClientSession(headers=HEADERS) as session:
-            # Space sahifasini ochish — uyg'onishni boshlaydi
+            # GET / — Cobalt v11 serverInfo qaytaradi, v7 redirect qiladi
             async with session.get(
                 api_url.rstrip("/"),
-                timeout=aiohttp.ClientTimeout(total=15),
+                timeout=aiohttp.ClientTimeout(total=20),
                 allow_redirects=True,
             ) as resp:
                 status = resp.status
+                body = await resp.text()
                 logger.info(f"[Cobalt] HF Space javob: HTTP {status}")
 
                 # Agar HTML qaytarsa — Space uyg'onyapti yoki ishlamayapti
-                body = await resp.text()
                 if body.strip().startswith("<"):
-                    # Space uyg'onyapti — biroz kutamiz
                     import asyncio
-                    logger.info("[Cobalt] HF Space uyg'onyapti, 5 sekund kutilmoqda...")
-                    await asyncio.sleep(5)
+                    logger.info("[Cobalt] HF Space uyg'onyapti, 8 sekund kutilmoqda...")
+                    await asyncio.sleep(8)
 
                     # Qayta tekshirish
                     async with session.get(
-                        f"{api_url.rstrip('/')}/api/json",
-                        timeout=aiohttp.ClientTimeout(total=15),
+                        api_url.rstrip("/"),
+                        timeout=aiohttp.ClientTimeout(total=20),
+                        allow_redirects=True,
                     ) as resp2:
                         body2 = await resp2.text()
                         if body2.strip().startswith("<"):
@@ -190,7 +191,12 @@ async def _wake_hf_space(api_url: str) -> bool:
                         logger.info("[Cobalt] HF Space API tayyor!")
                         return True
 
-                return True  # HTML emas — tayyor
+                # JSON javob — Cobalt ishlayapti!
+                if '"version"' in body or '"cobalt"' in body:
+                    logger.info("[Cobalt] HF Space tayyor!")
+                    return True
+
+                return True  # Noma'lum javob, ammo HTML emas — davom etamiz
 
     except Exception as e:
         logger.warning(f"[Cobalt] HF Space uyg'otish xatosi: {e}")
@@ -221,9 +227,10 @@ async def _try_cobalt(url: str, quality: str = "720", audio_only: bool = False) 
         logger.error("[Cobalt] HF Space ishlamayapti yoki API noto'g'ri o'rnatilgan!")
         return None
 
-    # Cobalt v7+ API endpoint
-    # v7.15+: /api/json ishlaydi (GET / → /api/serverInfo ga redirect)
-    endpoint = f"{api_url.rstrip('/')}/api/json"
+    # Cobalt API endpoint
+    # v11+: POST / (root) — Accept va Content-Type application/json bo'lishi shart!
+    # v7: POST /api/json (endi ishlatilmaydi)
+    endpoint = api_url.rstrip('/')
 
     connector = _get_proxy_connector()
     proxy = _get_proxy_url() if not connector else None
@@ -282,41 +289,71 @@ async def _try_cobalt(url: str, quality: str = "720", audio_only: bool = False) 
                 status = data.get("status", "")
 
                 if status == "error":
-                    # Cobalt v7.15 xato formati: {"status":"error","text":"..."}
-                    # yoki {"status":"error","error":{"code":"..."}}
+                    # Cobalt v11 xato formati: {"status":"error","error":{"code":"error.api.fetch.fail","context":{"service":"youtube"}}}
+                    # Cobalt v7: {"status":"error","text":"..."} yoki {"status":"error","error":{"code":"..."}}
                     error_text = data.get("text", "")
+                    error_obj = data.get("error", {})
+
                     if error_text:
                         logger.warning(f"[Cobalt] Xato: {error_text[:200]}")
                         if "cookie" in error_text.lower() or "login" in error_text.lower():
                             logger.error("[Cobalt] YouTube cookie kerak! HF Space ga COOKIE_PATH qo'shing.")
-                    else:
-                        error_obj = data.get("error", {})
-                        if isinstance(error_obj, dict):
-                            error_code = error_obj.get("code", "noma'lum")
-                        else:
-                            error_code = str(error_obj)
-                        logger.warning(f"[Cobalt] Xato kodi: {error_code}")
-                        if "cookie" in str(error_code).lower() or "login" in str(error_code).lower():
+                    elif isinstance(error_obj, dict):
+                        error_code = error_obj.get("code", "noma'lum")
+                        error_context = error_obj.get("context", {})
+                        ctx_str = f" ({error_context})" if error_context else ""
+                        logger.warning(f"[Cobalt] Xato kodi: {error_code}{ctx_str}")
+                        # YouTube bilan bog'liq xatolarni aniqroq ko'rsatish
+                        if "fetch.fail" in str(error_code) and error_context.get("service") == "youtube":
+                            logger.error("[Cobalt] YouTube yuklab bo'lmadi — yt-session-generator kerak yoki cookie eski!")
+                        elif "cookie" in str(error_code).lower() or "login" in str(error_code).lower():
                             logger.error("[Cobalt] YouTube cookie kerak! HF Space ga COOKIE_PATH qo'shing.")
+                    else:
+                        logger.warning(f"[Cobalt] Xato: {str(error_obj)[:200]}")
                     return None
 
-                # Yuklash URL
-                download_url = data.get("url")
+                # Yuklash URL — Cobalt v11 javob formatlari:
+                # redirect: {"status":"redirect","url":"https://..."}
+                # tunnel:   {"status":"tunnel","url":"/tunnel?id=...&sig=..."}
+                # picker:   {"status":"picker","picker":[{"url":"..."},...]}
+                # local-processing: {"status":"local-processing","tunnel":{...},"output":{...}}
+                download_url = None
+
+                # 1. To'g'ridan-to'g'ri URL (redirect yoki tunnel)
+                raw_url = data.get("url")
+                if raw_url:
+                    # Tunnel URL — /tunnel?id=... formatida, to'liq URL yasash
+                    if raw_url.startswith("/tunnel"):
+                        download_url = f"{api_url.rstrip('/')}{raw_url}"
+                    else:
+                        download_url = raw_url
+
+                # 2. local-processing (Cobalt v11 audio uchun)
                 if not download_url:
-                    tunnel = data.get("tunnel")
-                    if tunnel:
-                        download_url = tunnel
+                    tunnel_obj = data.get("tunnel")
+                    if isinstance(tunnel_obj, dict):
+                        # Tunnel obyektdan URL olish
+                        download_url = tunnel_obj.get("url") or tunnel_obj.get("proxy")
+                        if download_url and download_url.startswith("/"):
+                            download_url = f"{api_url.rstrip('/')}{download_url}"
+
+                # 3. Picker (bir nechta variant)
                 if not download_url:
                     picker = data.get("picker", [])
                     if picker and isinstance(picker, list):
-                        download_url = picker[0].get("url")
+                        first = picker[0]
+                        if isinstance(first, dict):
+                            download_url = first.get("url")
+                        elif isinstance(first, str):
+                            download_url = first
 
                 if download_url:
-                    logger.info("[Cobalt] Yuklash URL topildi!")
+                    logger.info(f"[Cobalt] Yuklash URL topildi! (status={status})")
                     return {
                         "source": "cobalt",
                         "download_url": download_url,
                         "audio_only": audio_only,
+                        "filename": data.get("filename", ""),
                     }
                 else:
                     logger.warning(f"[Cobalt] URL topilmadi: {str(data)[:200]}")
