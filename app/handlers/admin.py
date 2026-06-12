@@ -1,5 +1,3 @@
-"""Admin Handler - Admin panel with all management features"""
-
 import logging
 import os
 from typing import Optional
@@ -90,9 +88,10 @@ async def admin_users(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         return
 
-    users = await AdminService.get_top_users(10)
+    # BARCHA foydalanuvchilarni olish (limit yo'q)
+    users = await AdminService.get_users(limit=10000)
 
-    text = f"👥 {bold('Eng faol foydalanuvchilar')}\n\n{separator()}\n\n"
+    text = f"👥 {bold('Barcha foydalanuvchilar')} ({len(users)})\n\n{separator()}\n\n"
     for i, user in enumerate(users, 1):
         premium_badge = " ⭐" if user.is_premium_active else ""
         banned_badge = " 🚫" if user.is_banned else ""
@@ -100,6 +99,10 @@ async def admin_users(callback: CallbackQuery):
             f"{i}. {user.first_name or 'N/A'} (@{user.username or 'N/A'}){premium_badge}{banned_badge}\n"
             f"   🆔 {user.id} | 📥 {user.downloads_count} | 🔄 {user.referrals_count}\n\n"
         )
+
+    # Telegram xabar chegarasi — agar juda uzun bo'lsa, qisqartiramiz
+    if len(text) > 4000:
+        text = text[:3900] + f"\n\n... va yana {len(users) - 10} ta foydalanuvchi"
 
     kb = admin_back_kb()
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
@@ -644,4 +647,3 @@ async def admin_settings(callback: CallbackQuery, state: FSMContext):
     )
     kb = admin_back_kb()
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-

@@ -8,8 +8,9 @@ import aiohttp
 
 logger = logging.getLogger(__name__)
 
-# Cobalt API - JWT autentifikatsiya talab qiladi
-COBALT_API_URL = os.getenv("COBALT_API_URL", "https://api.cobalt.tools")
+# Cobalt API - env dan har safar o'qiladi (_try_cobalt ichida)
+# Eski modul o'zgaruvchilari qoldirildi, lekin _try_cobalt da os.getenv() ishlatiladi
+COBALT_API_URL = os.getenv("COBALT_API_URL", "")
 COBALT_API_KEY = os.getenv("COBALT_API_KEY", "")
 
 # Proxy sozlamalari
@@ -155,87 +156,116 @@ async def _try_cobalt(url: str, quality: str = "720", audio_only: bool = False) 
 
     logger.info(f"[Cobalt] {api_url} ga so'rov yuborilmoqda (kalit: {'bor' if api_key else 'yo\'q'})...")
 
-    try:
-        connector = _get_proxy_connector()
-        proxy = _get_proxy_url() if not connector else None
+    # Cobalt API v7+ endpointlari (eski versiyalar uchun ham moslash)
+    # v7+: /api/json  |  v6 va undan oldin: /
+    endpoints = [
+        f"{api_url.rstrip('/')}/api/json",   # v7+ — eng keng tarqalgan
+        f"{api_url.rstrip('/')}/",             # v6 va undan oldin
+    ]
 
-        async with aiohttp.ClientSession(connector=connector) as session:
-            cobalt_quality = quality.replace("p", "")
-            if audio_only:
-                cobalt_quality = "0"
+    connector = _get_proxy_connector()
+    proxy = _get_proxy_url() if not connector else None
 
-            payload = {
-                "url": url,
-                "videoQuality": cobalt_quality,
-                "filenameStyle": "basic",
-                "downloadMode": "audio" if audio_only else "auto",
-            }
+    cobalt_quality = quality.replace("p", "")
+    if audio_only:
+        cobalt_quality = "0"
 
-            headers = {
-                **HEADERS,
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            }
+    payload = {
+        "url": url,
+        "videoQuality": cobalt_quality,
+        "filenameStyle": "basic",
+        "downloadMode": "audio" if audio_only else "auto",
+    }
 
-            if api_key:
-                headers["Authorization"] = f"Bearer {api_key}"
+    headers = {
+        **HEADERS,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
 
-            async with session.post(
-                f"{api_url}/",
-                json=payload,
-                headers=headers,
-                proxy=proxy,
-                timeout=aiohttp.ClientTimeout(total=20),
-            ) as resp:
-                body = await resp.text()
-                logger.info(f"[Cobalt] HTTP {resp.status} - {body[:300]}")
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
 
-                if resp.status == 400 and ("jwt.missing" in body or "jwt.invalid" in body):
-                    logger.error("[Cobalt] JWT autentifikatsiya xatosi! COBALT_API_KEY ni tekshiring.")
-                    return None
+    for endpoint in endpoints:
+        try:
+            async with aiohttp.ClientSession(connector=connector) as session:
+                async with session.post(
+                    endpoint,
+                    json=payload,
+                    headers=headers,
+                    proxy=proxy,
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as resp:
+                    body = await resp.text()
+                    logger.info(f"[Cobalt] POST {endpoint} → HTTP {resp.status} - {body[:200]}")
 
-                if resp.status == 401:
-                    logger.error("[Cobalt] 401 Ruxsat yo'q! COBALT_API_KEY noto'g'ri bo'lishi mumkin.")
-                    return None
+                    # HTML javob = noto'g'ri endpoint (HF Space sahifasi)
+                    if resp.status in (200, 206) and body.strip().startswith("<"):
+                        logger.warning(f"[Cobalt] HTML javob — bu endpoint emas, keyingi urinilmoqda...")
+                        continue
 
-                if resp.status != 200:
-                    return None
+                    if resp.status == 400 and ("jwt.missing" in body or "jwt.invalid" in body):
+                        logger.error("[Cobalt] JWT autentifikatsiya xatosi! COBALT_API_KEY ni tekshiring.")
+                        return None
 
-                try:
-                    data = await resp.json()
-                except Exception:
-                    logger.warning("[Cobalt] JSON parse xatosi")
-                    return None
+                    if resp.status == 401:
+                        logger.error("[Cobalt] 401 Ruxsat yo'q! COBALT_API_KEY noto'g'ri bo'lishi mumkin.")
+                        return None
 
-                status = data.get("status", "")
+                    if resp.status != 200:
+                        continue
 
-                if status == "error":
-                    error_code = data.get("error", {}).get("code", "noma_lum") if isinstance(data.get("error"), dict) else str(data.get("error", ""))
-                    logger.warning(f"[Cobalt] {api_url}: Xato - {error_code}")
-                    return None
+                    try:
+                        data = await resp.json()
+                    except Exception:
+                        logger.warning("[Cobalt] JSON parse xatosi")
+                        continue
 
-                download_url = data.get("url")
+                    status = data.get("status", "")
 
-                if not download_url:
-                    picker = data.get("picker", [])
-                    if picker and isinstance(picker, list):
-                        download_url = picker[0].get("url")
+                    if status == "error":
+                        error_code = data.get("error", {}).get("code", "noma_lum") if isinstance(data.get("error"), dict) else str(data.get("error", ""))
+                        if "login" in error_code:
+                            logger.error(f"[Cobalt] YouTube cookie kerak! Xato: {error_code}")
+                        else:
+                            logger.warning(f"[Cobalt] {endpoint}: Xato - {error_code}")
+                        return None
 
-                if download_url:
-                    logger.info(f"[Cobalt] {api_url}: Yuklash URL topildi!")
-                    return {
-                        "source": "cobalt",
-                        "download_url": download_url,
-                        "audio_only": audio_only,
-                    }
-                else:
-                    logger.warning(f"[Cobalt] {api_url}: URL topilmadi")
+                    # Redirect/javob - turli Cobalt versiyalar
+                    download_url = data.get("url")
 
-    except aiohttp.ClientConnectorError as e:
-        logger.warning(f"[Cobalt] Proxy ulanish xatosi: {str(e)[:80]}")
-        _mark_proxy_broken()
-    except Exception as e:
-        logger.warning(f"[Cobalt] {api_url}: Xato - {str(e)[:100]}")
+                    if not download_url:
+                        # Cobalt v7+ tunnel/javob formati
+                        tunnel = data.get("tunnel")
+                        if tunnel:
+                            download_url = tunnel
+
+                    if not download_url:
+                        picker = data.get("picker", [])
+                        if picker and isinstance(picker, list):
+                            download_url = picker[0].get("url")
+
+                    if download_url:
+                        logger.info(f"[Cobalt] {endpoint}: Yuklash URL topildi!")
+                        return {
+                            "source": "cobalt",
+                            "download_url": download_url,
+                            "audio_only": audio_only,
+                        }
+                    else:
+                        logger.warning(f"[Cobalt] {endpoint}: URL topilmadi, javob: {str(data)[:200]}")
+
+        except aiohttp.ClientConnectorError as e:
+            logger.warning(f"[Cobalt] Proxy ulanish xatosi: {str(e)[:80]}")
+            _mark_proxy_broken()
+        except Exception as e:
+            logger.warning(f"[Cobalt] {endpoint}: Xato - {str(e)[:100]}")
+
+        except aiohttp.ClientConnectorError as e:
+            logger.warning(f"[Cobalt] Proxy ulanish xatosi: {str(e)[:80]}")
+            _mark_proxy_broken()
+        except Exception as e:
+         logger.warning(f"[Cobalt] {api_url}: Xato - {str(e)[:100]}")
 
     return None
 
@@ -467,10 +497,18 @@ async def download_youtube_via_api(url: str, quality: str = "720",
     logger.info("[API] 1-usul: Cobalt orqali yuklanmoqda...")
     cobalt_result = await _try_cobalt(url, quality, audio_only)
     if cobalt_result:
-        result = await _download_from_url(cobalt_result["download_url"], video_id, audio_only)
-        if result:
-            info = _make_basic_info(url, video_id, audio_only)
-            return result, info
+        download_url = cobalt_result.get("download_url")
+        if download_url:
+            result = await _download_from_url(download_url, video_id, audio_only)
+            if result:
+                info = _make_basic_info(url, video_id, audio_only)
+                return result, info
+            else:
+                logger.warning("[API] Cobalt URL topildi lekin yuklab bo'lmadi")
+        else:
+            logger.warning("[API] Cobalt javobida download_url yo'q")
+    else:
+        logger.info("[API] Cobalt ishlamadi, Invidious/Piped sinab ko'rilmoqda...")
 
     # 2: INVIDIOUS
     logger.info("[API] 2-usul: Invidious orqali yuklanmoqda...")

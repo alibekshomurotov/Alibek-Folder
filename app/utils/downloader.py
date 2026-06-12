@@ -715,40 +715,54 @@ async def _extract_youtube_info(url: str) -> Optional[Dict[str, Any]]:
     except Exception as e:
         logger.warning(f"[YouTube] API xatosi: {e}")
 
-    # === 3-BOSQICH: yt-dlp (1 marta, tezkor) ===
-    logger.info("[YouTube] yt-dlp sinab ko'rilmoqda (1 urinish)...")
+    # === 3-BOSQICH: yt-dlp — ko'plab player_client sinash ===
+    logger.info("[YouTube] yt-dlp sinab ko'rilmoqda (ko'plab player_client)...")
     cookies_path = _find_cookies_file()
 
-    try:
-        opts = {
-            "format": "all",
-            "quiet": True,
-            "no_warnings": True,
-            "extract_flat": False,
-            "noplaylist": True,
-            "geo_bypass": "US",
-            "geo_bypass_country": "US",
-            "socket_timeout": 10,
-        }
+    player_clients = []
+    if cookies_path:
+        player_clients.extend([
+            ("cookies+tv",   {"youtube": {"player_client": ["tv_embedded"]}}),
+            ("cookies+ios",  {"youtube": {"player_client": ["ios"]}}),
+            ("cookies+mweb", {"youtube": {"player_client": ["mweb"]}}),
+        ])
+    player_clients.extend([
+        ("ios",     {"youtube": {"player_client": ["ios"]}}),
+        ("mweb",    {"youtube": {"player_client": ["mweb"]}}),
+        ("android", {"youtube": {"player_client": ["android"]}}),
+    ])
 
-        if cookies_path:
-            opts["cookiefile"] = cookies_path
-            opts["extractor_args"] = {"youtube": {"player_client": ["tv_embedded"]}}
-        else:
-            opts["extractor_args"] = {"youtube": {"player_client": ["android"]}}
+    for label, extractor_args in player_clients:
+        use_cookies = "cookies" in label
+        try:
+            opts = {
+                "format": "all",
+                "quiet": True,
+                "no_warnings": True,
+                "extract_flat": False,
+                "noplaylist": True,
+                "geo_bypass": "US",
+                "geo_bypass_country": "US",
+                "socket_timeout": 10,
+                "extractor_args": extractor_args,
+            }
 
-        logger.info(f"[YouTube] yt-dlp: {'cookies+tv' if cookies_path else 'android'}")
+            if use_cookies:
+                opts["cookiefile"] = cookies_path
 
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            if info:
-                formats = info.get("formats", [])
-                if _has_video_audio(formats):
-                    logger.info("[YouTube] yt-dlp MUVOFAQIYATLI!")
-                    return info
+            logger.info(f"[YouTube] yt-dlp info: {label}")
 
-    except Exception as e:
-        logger.debug(f"[YouTube] yt-dlp: {str(e)[:80]}")
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                if info:
+                    formats = info.get("formats", [])
+                    if _has_video_audio(formats):
+                        logger.info(f"[YouTube] yt-dlp MUVOFAQIYATLI: {label}")
+                        return info
+
+        except Exception as e:
+            logger.debug(f"[YouTube] yt-dlp {label}: {str(e)[:80]}")
+            continue
 
     logger.error("[YouTube] Barcha usullar muvaffaqiyatsiz")
     return None
@@ -914,74 +928,78 @@ async def _download_youtube(url: str, quality: str = "720",
     except Exception as e:
         logger.warning(f"[YouTube] API yuklash xatosi: {e}")
 
-    # === 3-BOSQICH: yt-dlp orqali yuklash (1 urinish) ===
+    # === 3-BOSQICH: yt-dlp orqali yuklash — ko'plab player_client sinash ===
     cookies_path = _find_cookies_file()
-
     output_path = tempfile.mkdtemp()
 
-    try:
-        use_cookies = bool(cookies_path)
-        label = "cookies+tv" if use_cookies else "android"
-        logger.info(f"[YouTube] yt-dlp yuklash: {label}")
+    # Turli player_client lar bilan sinash — ba'zilari datacenter IP da ishlashi mumkin
+    player_clients = []
+    if cookies_path:
+        player_clients.extend([
+            ("cookies+tv",    {"youtube": {"player_client": ["tv_embedded"]}}),
+            ("cookies+ios",   {"youtube": {"player_client": ["ios"]}}),
+            ("cookies+mweb",  {"youtube": {"player_client": ["mweb"]}}),
+        ])
+    player_clients.extend([
+        ("ios",      {"youtube": {"player_client": ["ios"]}}),
+        ("mweb",     {"youtube": {"player_client": ["mweb"]}}),
+        ("android",  {"youtube": {"player_client": ["android"]}}),
+    ])
 
-        opts = _build_download_opts(output_path, quality, audio_only, use_cookies, "best")
+    for i, (label, extractor_args) in enumerate(player_clients):
+        use_cookies = "cookies" in label
+        try:
+            logger.info(f"[YouTube] yt-dlp yuklash {i+1}/{len(player_clients)}: {label}")
 
-        if use_cookies:
-            opts["extractor_args"] = {"youtube": {"player_client": ["tv_embedded"]}}
-        else:
-            opts["extractor_args"] = {"youtube": {"player_client": ["android"]}}
+            opts = _build_download_opts(output_path, quality, audio_only, use_cookies, "best")
+            opts["extractor_args"] = extractor_args
+            opts["geo_bypass"] = "US"
+            opts["geo_bypass_country"] = "US"
+            opts["socket_timeout"] = 10
 
-        opts["geo_bypass"] = "US"
-        opts["geo_bypass_country"] = "US"
-        opts["socket_timeout"] = 10
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=True)
 
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=True)
+                if info is None:
+                    logger.warning(f"[YouTube] yt-dlp {label}: info qaytarmadi")
+                    continue
 
-            if info is None:
-                logger.warning("[YouTube] yt-dlp info qaytarmadi")
-                return None
+                file_path = ydl.prepare_filename(info)
 
-            file_path = ydl.prepare_filename(info)
+                if audio_only and config.download.ffmpeg_available:
+                    base_path = os.path.splitext(file_path)[0]
+                    mp3_path = base_path + ".mp3"
+                    if os.path.exists(mp3_path):
+                        file_path = mp3_path
 
-            if audio_only and config.download.ffmpeg_available:
-                base_path = os.path.splitext(file_path)[0]
-                mp3_path = base_path + ".mp3"
-                if os.path.exists(mp3_path):
-                    file_path = mp3_path
+                if not os.path.exists(file_path):
+                    files = os.listdir(output_path)
+                    if files:
+                        file_path = os.path.join(output_path, files[0])
+                    else:
+                        logger.warning(f"[YouTube] yt-dlp {label}: fayl yaratmadi")
+                        continue
 
-            if not os.path.exists(file_path):
-                files = os.listdir(output_path)
-                if files:
-                    file_path = os.path.join(output_path, files[0])
-                else:
-                    logger.warning("[YouTube] yt-dlp fayl yaratmadi")
+                # Fayl hajmini tekshirish
+                file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+                if file_size_mb > config.download.max_file_size_mb:
+                    logger.warning(f"[YouTube] Fayl juda katta: {file_size_mb:.1f}MB")
+                    try:
+                        os.remove(file_path)
+                    except OSError:
+                        pass
                     return None
 
-            # Fayl hajmini tekshirish
-            file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-            if file_size_mb > config.download.max_file_size_mb:
-                logger.warning(f"[YouTube] Fayl juda katta: {file_size_mb:.1f}MB")
-                try:
-                    os.remove(file_path)
-                except OSError:
-                    pass
+                logger.info(f"[YouTube] yt-dlp yuklash MUVOFAQIYATLI: {label}")
+                return file_path, info
+
+        except Exception as e:
+            err_str = str(e)
+            if "MaxDownloads" in str(type(e).__name__) or "MaxDownloads" in err_str:
+                logger.warning("[YouTube] Fayl hajmi cheklovdan oshdi")
                 return None
-
-            logger.info(f"[YouTube] yt-dlp yuklash MUVOFAQIYATLI: {label}")
-            return file_path, info
-
-    except AttributeError as e:
-        if "MaxDownloads" in str(e):
-            logger.warning("[YouTube] Fayl hajmi cheklovdan oshdi")
-            return None
-        logger.warning(f"[YouTube] yt-dlp AttributeError: {str(e)[:100]}")
-    except Exception as e:
-        err_str = str(e)
-        if "MaxDownloads" in str(type(e).__name__) or "MaxDownloads" in err_str:
-            logger.warning("[YouTube] Fayl hajmi cheklovdan oshdi")
-            return None
-        logger.warning(f"[YouTube] yt-dlp xato: {err_str[:100]}")
+            logger.warning(f"[YouTube] yt-dlp {label}: {err_str[:80]}")
+            continue
 
     logger.error("[YouTube] Barcha yuklash usullari muvaffaqiyatsiz")
     return None
