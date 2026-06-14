@@ -23,6 +23,9 @@ YOUTUBE_PROXY = os.getenv("YOUTUBE_PROXY", "") or os.getenv("HTTP_PROXY", "") or
 # Proxy holati - agar proxy xato bersa, keyingi so'rovlarda ishlatmaymiz
 _proxy_broken = False
 
+# Cobalt holati - agar HF Space ishlamasa, keyingi so'rovlarda o'tkazib yuboramiz
+_cobalt_broken_until = 0  # timestamp — shu vaqtgacha Cobalt ni o'tkazib yuborish
+
 # PO Token - YouTube bot detektsiyasini chetlab o'tish uchun
 PO_TOKEN = os.getenv("PO_TOKEN", "")
 
@@ -266,6 +269,12 @@ async def _try_cobalt(url: str, quality: str = "720", audio_only: bool = False) 
         logger.debug("[Cobalt] COBALT_API_URL o'rnatilmagan")
         return None
 
+    # Cobalt yaqinda ishlamagan bo'lsa, o'tkazib yuborish (5 daqiqa kesh)
+    global _cobalt_broken_until
+    if time.time() < _cobalt_broken_until:
+        logger.debug("[Cobalt] Yaqinda ishlamadi, o'tkazib yuborilmoqda...")
+        return None
+
     # Faqat rasmiy cobalt.tools API uchun kalit talab qilinadi
     # O'z serverimizda (HF Space) kalit shart emas!
     if not api_key and ("cobalt.tools" in api_url or "api.cobalt.tools" == api_url.rstrip("/")):
@@ -280,6 +289,7 @@ async def _try_cobalt(url: str, quality: str = "720", audio_only: bool = False) 
         space_ready = await _wake_hf_space(api_url)
         if not space_ready:
             logger.error("[Cobalt] HF Space ishlamayapti yoki API noto'g'ri o'rnatilgan!")
+            _cobalt_broken_until = time.time() + 300  # 5 daqiqaga o'tkazib yuborish
             return None
 
     # Cobalt API endpoint
@@ -365,6 +375,8 @@ async def _try_cobalt(url: str, quality: str = "720", audio_only: bool = False) 
                         # YouTube bilan bog'liq xatolarni aniqroq ko'rsatish
                         if "fetch.fail" in str(error_code) and error_context.get("service") == "youtube":
                             logger.error("[Cobalt] YouTube yuklab bo'lmadi — yt-session-generator kerak yoki cookie eski!")
+                            # Cobalt 5 daqiqaga o'tkazib yuborish — vaqt tejash
+                            _cobalt_broken_until = time.time() + 300
                         elif "cookie" in str(error_code).lower() or "login" in str(error_code).lower():
                             logger.error("[Cobalt] YouTube cookie kerak! HF Space ga COOKIE_PATH qo'shing.")
                     else:
@@ -1202,36 +1214,48 @@ async def download_youtube_via_api(url: str, quality: str = "720",
         else:
             logger.info(f"[API] InnerTube ishlamadi ({time.time()-start_time:.1f}s), keyingi usul...")
 
-    # 3: INVIDIOUS PROXY DOWNLOAD — tezkor 3 ta instance bilan
-    logger.info("[API] 3-usul: Invidious proxy orqali yuklanmoqda...")
-    inv_proxy_result = await _try_invidious_proxy_download(video_id, quality, audio_only)
-    if inv_proxy_result:
-        logger.info(f"[API] Invidious proxy MUVOFAQIYATLI ({time.time()-start_time:.1f}s)")
-        return inv_proxy_result
+    # 3: INVIDIOUS PROXY DOWNLOAD — tezkor 2 ta instance bilan (qisqartirilgan)
+    elapsed = time.time() - start_time
+    if elapsed < 25:  # Agar hali vaqt bo'lsa
+        logger.info("[API] 3-usul: Invidious proxy orqali yuklanmoqda...")
+        inv_proxy_result = await _try_invidious_proxy_download(video_id, quality, audio_only)
+        if inv_proxy_result:
+            logger.info(f"[API] Invidious proxy MUVOFAQIYATLI ({time.time()-start_time:.1f}s)")
+            return inv_proxy_result
+    else:
+        logger.info("[API] 3-usul o'tkazib yuborildi (vaqt tugadi)")
 
     # 4: INVIDIOUS API — tezkor instancelar bilan
-    logger.info("[API] 4-usul: Invidious orqali yuklanmoqda...")
-    inv_result = await _try_invidious(video_id, fast_only=True)
-    if inv_result:
-        download_url, file_ext = _find_best_invidious_download(inv_result["data"], quality, audio_only)
-        if download_url:
-            result = await _download_from_url(download_url, video_id, audio_only, file_ext)
-            if result:
-                info = convert_api_info_to_ytdlp(inv_result)
-                logger.info(f"[API] Invidious MUVOFAQIYATLI ({time.time()-start_time:.1f}s)")
-                return result, info
+    elapsed = time.time() - start_time
+    if elapsed < 25:
+        logger.info("[API] 4-usul: Invidious orqali yuklanmoqda...")
+        inv_result = await _try_invidious(video_id, fast_only=True)
+        if inv_result:
+            download_url, file_ext = _find_best_invidious_download(inv_result["data"], quality, audio_only)
+            if download_url:
+                result = await _download_from_url(download_url, video_id, audio_only, file_ext)
+                if result:
+                    info = convert_api_info_to_ytdlp(inv_result)
+                    logger.info(f"[API] Invidious MUVOFAQIYATLI ({time.time()-start_time:.1f}s)")
+                    return result, info
+    else:
+        logger.info("[API] 4-usul o'tkazib yuborildi (vaqt tugadi)")
 
     # 5: PIPED — tezkor instancelar bilan
-    logger.info("[API] 5-usul: Piped orqali yuklanmoqda...")
-    piped_result = await _try_piped(video_id, fast_only=True)
-    if piped_result:
-        download_url, file_ext = _find_best_piped_download(piped_result["data"], quality, audio_only)
-        if download_url:
-            result = await _download_from_url(download_url, video_id, audio_only, file_ext)
-            if result:
-                info = convert_api_info_to_ytdlp(piped_result)
-                logger.info(f"[API] Piped MUVOFAQIYATLI ({time.time()-start_time:.1f}s)")
-                return result, info
+    elapsed = time.time() - start_time
+    if elapsed < 25:
+        logger.info("[API] 5-usul: Piped orqali yuklanmoqda...")
+        piped_result = await _try_piped(video_id, fast_only=True)
+        if piped_result:
+            download_url, file_ext = _find_best_piped_download(piped_result["data"], quality, audio_only)
+            if download_url:
+                result = await _download_from_url(download_url, video_id, audio_only, file_ext)
+                if result:
+                    info = convert_api_info_to_ytdlp(piped_result)
+                    logger.info(f"[API] Piped MUVOFAQIYATLI ({time.time()-start_time:.1f}s)")
+                    return result, info
+    else:
+        logger.info("[API] 5-usul o'tkazib yuborildi (vaqt tugadi)")
 
     total_time = time.time() - start_time
     logger.error(f"[API] Barcha yuklash usullari muvaffaqiyatsiz ({total_time:.1f}s)")
@@ -1255,9 +1279,13 @@ async def _download_from_url(url: str, video_id: str, audio_only: bool,
         from app.config import config as app_config
         max_size = app_config.download.max_file_size_mb * 1024 * 1024
 
-        # Avval proxiesz, keyin proxy bilan
-        for use_proxy in [False, True]:
-            if use_proxy and not _is_proxy_available():
+        # Agar proxy mavjud bo'lsa, avval proxy bilan urinish (YouTube fayllari datacenter IP dan yuklamaydi)
+        # Agar proxy yo'q bo'lsa, proxiesz urinish
+        proxy_available = _is_proxy_available()
+        proxy_order = [True, False] if proxy_available else [False]
+
+        for use_proxy in proxy_order:
+            if use_proxy and not proxy_available:
                 continue
 
             connector = _get_proxy_connector() if use_proxy else None

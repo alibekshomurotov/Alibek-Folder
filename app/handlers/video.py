@@ -1,3 +1,9 @@
+"""Video Handler - Tez va sodda video yuklash
+
+Foydalanuvchi link yuboradi → bot avtomatik yuklaydi →
+video tagida MP3 tugmasi ko'rsatiladi.
+"""
+
 import asyncio
 import json
 import logging
@@ -215,7 +221,12 @@ async def handle_video_link(message: Message, state: FSMContext):
 
             if platform == "youtube":
                 await message.answer(
-                    "❌ <b>YouTube yuklab bo'lmadi</b>\n\nServer IP bloklangan.",
+                    "❌ <b>YouTube yuklab bo'lmadi</b>\n\n"
+                    "🔍 Sabab: YouTube server IP ni bloklamoqda (bot detektsiya).\n\n"
+                    "💡 Yechim:\n"
+                    "• Keyinroq qayta urinib ko'ring\n"
+                    "• Boshqa video linkini yuboring\n"
+                    "• Agar doim shu xato chiqsa — administratorga xabar bering",
                     parse_mode="HTML",
                 )
             else:
@@ -330,6 +341,9 @@ async def handle_mp3_request(callback: CallbackQuery, state: FSMContext):
         await callback.answer("⏰ Qayta link yuboring.", show_alert=True)
         return
 
+    # Callback javobini ZUDLIK BILAN berish — Telegram 30s dan keyin o'chiradi
+    await callback.answer("⏬ Audio yuklanmoqda...")
+
     url = cache_data["url"]
 
     loading_msg = await callback.message.answer("⏳")
@@ -385,8 +399,7 @@ async def handle_mp3_request(callback: CallbackQuery, state: FSMContext):
     finally:
         if file_path_to_cleanup:
             cleanup_file(file_path_to_cleanup)
-
-    await callback.answer()
+    # callback.answer() allaqachon yuqorida chaqirildi — bu yerda qayta chaqirish shart emas
 
 
 @router.callback_query(F.data == "cancel_download")
