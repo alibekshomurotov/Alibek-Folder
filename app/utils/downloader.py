@@ -192,6 +192,13 @@ def log_cookies_status() -> None:
     else:
         logger.warning("[PO_TOKEN] O'RNATILMAGAN! YouTube bot detektsiyasini chetlab o'tish uchun kerak.")
 
+    # VISITOR_DATA holatini tekshirish
+    visitor_data = os.getenv("VISITOR_DATA", "")
+    if visitor_data:
+        logger.info(f"[VISITOR_DATA] Mavjud ({len(visitor_data)} belgi)")
+    else:
+        logger.info("[VISITOR_DATA] O'rnatilmagan (ixtiyoriy — PO_TOKEN bilan birga ishlaydi)")
+
 
 def _is_bot_detection_error(error: Exception) -> bool:
     """Xato bot detektsiya bilan bog'liq ekanligini tekshirish."""
@@ -271,6 +278,12 @@ def _build_base_opts(use_cookies: bool = True) -> Dict[str, Any]:
     po_token = os.getenv("PO_TOKEN", "")
     if po_token:
         opts.setdefault("extractor_args", {}).setdefault("youtube", {})["po_token"] = f"web+{po_token}"
+
+    # Proxy qo'shish (YOUTUBE_PROXY yoki HTTP_PROXY/HTTPS_PROXY)
+    proxy = os.getenv("YOUTUBE_PROXY", "") or os.getenv("HTTP_PROXY", "") or os.getenv("HTTPS_PROXY", "")
+    if proxy:
+        opts["proxy"] = proxy
+        logger.debug(f"[yt-dlp] Proxy ishlatilmoqda: {proxy.split('@')[-1]}")
 
     return opts
 
@@ -862,7 +875,12 @@ async def _extract_youtube_info(url: str) -> Optional[Dict[str, Any]]:
             if use_cookies:
                 opts["cookiefile"] = cookies_path
 
-            logger.info(f"[YouTube] yt-dlp info: {label}")
+            # Proxy qo'shish (YOUTUBE_PROXY yoki HTTP_PROXY/HTTPS_PROXY)
+            proxy = os.getenv("YOUTUBE_PROXY", "") or os.getenv("HTTP_PROXY", "") or os.getenv("HTTPS_PROXY", "")
+            if proxy:
+                opts["proxy"] = proxy
+
+            logger.info(f"[YouTube] yt-dlp info: {label} (proxy: {'bor' if proxy else 'yo\'q'})")
 
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
@@ -1056,7 +1074,8 @@ async def _download_youtube(url: str, quality: str = "720",
     for i, (label, extractor_args) in enumerate(player_clients):
         use_cookies = "cookies" in label
         try:
-            logger.info(f"[YouTube] yt-dlp yuklash {i+1}/{len(player_clients)}: {label}")
+            proxy = os.getenv("YOUTUBE_PROXY", "") or os.getenv("HTTP_PROXY", "") or os.getenv("HTTPS_PROXY", "")
+            logger.info(f"[YouTube] yt-dlp yuklash {i+1}/{len(player_clients)}: {label} (proxy: {'bor' if proxy else 'yo\'q'})")
 
             opts = _build_download_opts(output_path, quality, audio_only, use_cookies, "best")
             opts["geo_bypass"] = "US"

@@ -565,9 +565,14 @@ async def _innertube_player_request(video_id: str, client_key: str,
     # Klient kontekstini nusxalash (apiKey ni olib tashlash)
     client_info = {k: v for k, v in client_ctx.items() if k != "apiKey"}
 
-    # PO Token qo'shish (web va mweb klientlari uchun)
-    if po_token and client_key in ("web", "mweb"):
+    # PO Token qo'shish (web, mweb, web_embed klientlari uchun)
+    if po_token and client_key in ("web", "mweb", "web_embed"):
         client_info["poToken"] = po_token
+
+    # VISITOR_DATA qo'shish (muhim — YouTube visitor identifikatsiyasi)
+    visitor_data = os.getenv("VISITOR_DATA", "")
+    if visitor_data and client_key in ("web", "mweb", "web_embed"):
+        client_info["visitorData"] = visitor_data
 
     # Cookies fayldan SAPISIDHASH olish
     sapisid = ""
@@ -635,6 +640,12 @@ async def _innertube_player_request(video_id: str, client_key: str,
     use_proxy = _is_proxy_available()
     connector = _get_proxy_connector() if use_proxy else None
     proxy = _get_proxy_url() if use_proxy and not connector else None
+
+    if use_proxy:
+        proxy_display = YOUTUBE_PROXY.split('@')[-1] if '@' in YOUTUBE_PROXY else YOUTUBE_PROXY[:30]
+        logger.info(f"[InnerTube] {client_key}: Proxy ishlatilmoqda ({proxy_display})")
+    else:
+        logger.info(f"[InnerTube] {client_key}: Proxiesz")
 
     try:
         async with aiohttp.ClientSession(connector=connector) as session:
