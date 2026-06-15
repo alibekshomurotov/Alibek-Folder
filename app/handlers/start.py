@@ -74,12 +74,13 @@ async def cmd_start(message: Message, state: FSMContext):
     inline_kb = main_menu_kb()
 
     if config.bot.is_admin(message.from_user.id):
-        # Admin uchun: reply keyboard (pastdagi admin tugma) o'rnatish,
-        # lekin hech qanday qo'shimcha xabar ko'rsatmaslik
+        # Admin uchun: reply keyboard (pastdagi admin tugma) o'rnatish
         from app.keyboards.reply import admin_reply_kb
-        await message.answer(text, reply_markup=inline_kb, parse_mode="HTML")
-        temp_msg = await message.answer("​", reply_markup=admin_reply_kb())
-        await temp_msg.delete()
+        await message.answer(
+            text,
+            reply_markup=admin_reply_kb(),
+            parse_mode="HTML",
+        )
     else:
         await message.answer(text, reply_markup=ReplyKeyboardRemove(), parse_mode="HTML")
 

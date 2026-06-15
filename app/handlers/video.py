@@ -1,3 +1,9 @@
+"""Video Handler - Tez va sodda video yuklash
+
+Foydalanuvchi link yuboradi → bot avtomatik yuklaydi →
+video tagida MP3 tugmasi ko'rsatiladi.
+"""
+
 import asyncio
 import json
 import logging
@@ -228,19 +234,12 @@ async def _pre_extract_mp3(key: str, video_path: str, info: dict):
 
 @router.message(StateFilter(None), ~F.text.startswith("/"))
 async def handle_video_link(message: Message, state: FSMContext):
-    """Link → avtomatik yuklash → video + MP3 tugmasi
-    URL bo'lmasa → musiqa qidirish"""
+    """Link → avtomatik yuklash → video + MP3 tugmasi"""
     url = extract_url(message.text or "")
     if not url:
-        # URL yo'q — musiqa qidirishga harakat qilish
-        query = (message.text or "").strip()
-        if len(query) >= 2:
-            await _handle_music_search(message, query)
         return
 
     if not is_video_url(url):
-        # URL bor lekin video emas — musiqa qidirishga harakat
-        await _handle_music_search(message, message.text.strip())
         return
 
     # Obuna tekshirish
@@ -558,81 +557,3 @@ async def cancel_download(callback: CallbackQuery, state: FSMContext):
             await callback.answer("❌ Bekor qilindi")
         except Exception:
             pass
-
-
-# ============ Musiqa qidirish (matn orqali) ============
-
-async def _handle_music_search(message: Message, query: str):
-    """Matn orqali musiqa qidirish — Shazam Search API + audio yuklab yuborish"""
-    from app.handlers.music_recognize import (
-        search_song, format_search_results,
-        _extract_track_info, _cache_music, _make_download_kb,
-        _download_and_send_audio,
-    )
-
-    # Obuna tekshirish
-    if not config.bot.is_admin(message.from_user.id):
-        is_subscribed, unsubscribed = await SubscriptionService.is_subscribed(
-            message.bot, message.from_user.id
-        )
-        if not is_subscribed:
-            from app.keyboards.inline import subscription_check_kb
-            from app.utils.formatter import format_subscription_required
-            text = format_subscription_required(unsubscribed)
-            kb = subscription_check_kb(unsubscribed)
-            await message.answer(text, reply_markup=kb, parse_mode="HTML")
-            return
-
-    loading_msg = await message.answer("🔍 <b>Qo'shiq qidirilmoqda...</b>", parse_mode="HTML")
-
-    try:
-        tracks = await search_song(query, limit=5)
-
-        try:
-            await loading_msg.delete()
-        except Exception:
-            pass
-
-        if not tracks:
-            result_text = format_search_results(query, tracks)
-            await message.answer(result_text, parse_mode="HTML")
-            return
-
-        # Birinchi natijani avtomatik yuklab yuborish
-        first_hit = tracks[0]
-        track_data = first_hit.get("track", first_hit)
-        track_info = _extract_track_info({"track": track_data})
-        yt_url = track_info.get("youtube_url", "")
-
-        # Natijalarni ko'rsatish
-        result_text = format_search_results(query, tracks)
-
-        # Download tugmasi
-        kb = None
-        if yt_url:
-            cache_key = str(hash(yt_url) % 100000000)
-            _cache_music(cache_key, track_info, yt_url)
-            kb = _make_download_kb(cache_key)
-
-        await message.answer(result_text, parse_mode="HTML", reply_markup=kb)
-
-        # Audio faylni zudlik bilan yuklab yuborish
-        if yt_url:
-            success = await _download_and_send_audio(message, yt_url, track_info)
-            if not success:
-                await message.answer(
-                    "⚠️ <b>Birinchi qo'shiqni yuklab bo'lmadi.</b>\n\n"
-                    "💡 Yuqoridagi tugma orqali qayta urinib ko'ring.",
-                    parse_mode="HTML",
-                )
-
-    except Exception as e:
-        logger.error(f"[Music] Search xatosi: {e}")
-        try:
-            await loading_msg.delete()
-        except Exception:
-            pass
-        await message.answer(
-            "⚠️ <b>Server band.</b> Qayta urinib ko'ring.",
-            parse_mode="HTML",
-        )

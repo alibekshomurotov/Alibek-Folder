@@ -52,6 +52,7 @@ async def start_health_server():
                 found_critical = [c for c in critical if c in cookie_text]
                 missing_critical = [c for c in critical if c not in cookie_text]
 
+                # Instagram cookie validation
                 ig_validation = _validate_instagram_cookies(path)
 
                 result.update({
@@ -91,20 +92,25 @@ async def start_health_server():
 
 async def main():
     """Main function to start the bot"""
+    # Validate config
     if not config.bot.token:
         logger.error("BOT_TOKEN is not set! Please set it in .env file or environment variables.")
         sys.exit(1)
 
+    # Start health check server for Render Web Service
     await start_health_server()
 
+    # Initialize database
     logger.info("Initializing database...")
     await init_db()
     logger.info("Database initialized.")
 
+    # Log yt-dlp version
     import yt_dlp as _ydl
     yt_version = _ydl.version.__version__
     logger.info(f"[yt-dlp] Running version: {yt_version}")
 
+    # Warn if version looks too old
     try:
         year, month = yt_version.split(".")[:2]
         if int(year) < 2026 or (int(year) == 2025 and int(month) < 12):
@@ -115,9 +121,11 @@ async def main():
     except (ValueError, IndexError):
         pass
 
+    # Log cookies status at startup
     from app.utils.downloader import log_cookies_status
     log_cookies_status()
 
+    # Create bot and dispatcher
     bot = Bot(
         token=config.bot.token,
         default=DefaultBotProperties(
@@ -127,6 +135,7 @@ async def main():
 
     dp = Dispatcher()
 
+    # Register middleware
     from app.middleware.auth import AuthMiddleware
     from app.middleware.throttle import ThrottleMiddleware
     from app.middleware.logging import LoggingMiddleware
@@ -142,24 +151,26 @@ async def main():
     from app.handlers.start import router as start_router
     from app.handlers.video import router as video_router
     from app.handlers.profile import router as profile_router
-    from app.handlers.music_recognize import router as music_router
+    # from app.handlers.music_recognize import router as music_router  # Hozircha o'chirilgan
     from app.handlers.admin import router as admin_router
     from app.handlers.callback_cancel import router as cancel_router
 
     dp.include_router(start_router)
     dp.include_router(admin_router)
     dp.include_router(profile_router)
-    dp.include_router(music_router)
+    # dp.include_router(music_router)  # Hozircha o'chirilgan
     dp.include_router(video_router)
     dp.include_router(cancel_router)
 
     logger.info("Starting Video Downloader Pro bot...")
 
+    # Check FFmpeg
     if config.download.ffmpeg_available:
         logger.info("FFmpeg detected - full quality support enabled")
     else:
         logger.warning("FFmpeg not found - limited quality support (pre-merged formats only)")
 
+    # Start polling
     logger.info("Starting polling mode...")
     await bot.delete_webhook(drop_pending_updates=True)
     try:
