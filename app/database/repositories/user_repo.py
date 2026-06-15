@@ -9,7 +9,7 @@ from typing import List, Optional
 from sqlalchemy import select, update, func, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database.models import User, PremiumLog, Referral
+from app.database.models import User, Referral
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +50,6 @@ class UserRepository:
             referrer = await self.get_by_id(referred_by)
             if referrer:
                 referrer.referrals_count += 1
-                await self._check_referral_premium(referrer)
             await self.session.commit()
 
         return user
@@ -101,53 +100,10 @@ class UserRepository:
         )
         await self.session.commit()
 
-    async def grant_premium(self, user_id: int, days: int, reason: str = "admin_grant") -> None:
-        """Grant premium to a user"""
-        user = await self.get_by_id(user_id)
-        if user:
-            now = datetime.now()
-            if user.is_premium_active and user.premium_until:
-                user.premium_until = max(user.premium_until, now) + timedelta(days=days)
-            else:
-                user.is_premium = True
-                user.premium_until = now + timedelta(days=days)
-
-            # Log premium action
-            log = PremiumLog(user_id=user_id, days=days, reason=reason)
-            self.session.add(log)
-            await self.session.commit()
-
-    async def revoke_premium(self, user_id: int) -> None:
-        """Revoke premium from a user"""
-        await self.session.execute(
-            update(User).where(User.id == user_id).values(
-                is_premium=False,
-                premium_until=None,
-            )
-        )
-        await self.session.commit()
-
-    async def check_expired_premiums(self) -> int:
-        """Check and deactivate expired premium users"""
-        result = await self.session.execute(
-            update(User)
-            .where(and_(User.is_premium == True, User.premium_until < datetime.now()))
-            .values(is_premium=False)
-        )
-        await self.session.commit()
-        return result.rowcount
-
     async def get_all_users(self, limit: int = 100, offset: int = 0) -> List[User]:
         """Get all users with pagination"""
         result = await self.session.execute(
             select(User).order_by(User.registered_at.desc()).limit(limit).offset(offset)
-        )
-        return list(result.scalars().all())
-
-    async def get_premium_users(self) -> List[User]:
-        """Get all premium users"""
-        result = await self.session.execute(
-            select(User).where(User.is_premium == True)
         )
         return list(result.scalars().all())
 
@@ -171,13 +127,6 @@ class UserRepository:
         )
         return result.scalar()
 
-    async def get_premium_count(self) -> int:
-        """Get number of premium users"""
-        result = await self.session.execute(
-            select(func.count(User.id)).where(User.is_premium == True)
-        )
-        return result.scalar()
-
     async def search_users(self, query: str) -> List[User]:
         """Search users by ID or username"""
         result = await self.session.execute(
@@ -197,12 +146,3 @@ class UserRepository:
             )
             if result.scalar_one_or_none() is None:
                 return code
-
-    async def _check_referral_premium(self, referrer: User) -> None:
-        """Check if referrer earned premium from referrals"""
-        from app.config import config
-
-        if referrer.referrals_count >= 20:
-            await self.grant_premium(referrer.id, config.premium.referral_20_days, "referral_20")
-        elif referrer.referrals_count >= 5:
-            await self.grant_premium(referrer.id, config.premium.referral_5_days, "referral_5")

@@ -41,6 +41,9 @@ _CACHE_TTL = 1800  # 30 daqiqa
 _video_file_cache: Dict[str, dict] = {}  # {key: {"file_path": str, "info": dict, "cached_at": float}}
 _VIDEO_FILE_CACHE_TTL = 300  # 5 daqiqa
 
+# Oldindan tayyorlangan MP3 fayl keshi
+_mp3_ready_cache: Dict[str, str] = {}  # {key: mp3_file_path}
+
 # Bot username
 _BOT_LINK = "@UzVideoSaveBot"
 
@@ -159,6 +162,16 @@ def _make_mp3_kb(url: str) -> InlineKeyboardMarkup:
             except OSError:
                 pass
         del _video_file_cache[k]
+    # MP3 tayyor kesh tozalash
+    mp3_expired_keys = [k for k, v in _url_cache.items() if now - v.get("cached_at", 0) > _CACHE_TTL]
+    for k in list(_mp3_ready_cache.keys()):
+        if k not in _url_cache:
+            old_mp3 = _mp3_ready_cache.pop(k, "")
+            if old_mp3 and os.path.exists(old_mp3):
+                try:
+                    os.remove(old_mp3)
+                except OSError:
+                    pass
 
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎵 MP3", callback_data=f"mp3_{key}")]
@@ -178,6 +191,45 @@ def _format_story_error(missing_cookies: list = None) -> str:
         "📸 Reels va Post'lar ishlaydi!"
     )
     return base
+
+
+def _extract_mp3_sync(video_path: str, mp3_path: str) -> bool:
+    """ffmpeg bilan MP3 ajratish (sync — thread da ishlaydi)."""
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-i", video_path,
+             "-vn",
+             "-acodec", "libmp3lame",
+             "-ab", "128k",
+             "-ar", "44100",
+             "-ac", "2",
+             "-y", mp3_path],
+            capture_output=True, timeout=20
+        )
+        return result.returncode == 0 and os.path.exists(mp3_path) and os.path.getsize(mp3_path) > 0
+    except Exception as e:
+        logger.warning(f"[MP3] ffmpeg xatosi: {e}")
+        return False
+
+
+async def _pre_extract_mp3(key: str, video_path: str, info: dict):
+    """Fon rejimida MP3 tayyorlash — foydalanuvchi MP3 tugmasini bosganda tayyor bo'ladi."""
+    if not config.download.ffmpeg_available:
+        return
+
+    mp3_dir = os.path.join(tempfile.gettempdir(), "mp3_cache")
+    os.makedirs(mp3_dir, exist_ok=True)
+    mp3_path = os.path.join(mp3_dir, f"{key}_pre.mp3")
+
+    try:
+        success = await asyncio.to_thread(_extract_mp3_sync, video_path, mp3_path)
+        if success:
+            _mp3_ready_cache[key] = mp3_path
+            logger.info(f"[MP3] Oldindan tayyorlandi: {mp3_path}")
+        else:
+            logger.warning("[MP3] Oldindan tayyorlash muvaffaqiyatsiz")
+    except Exception as e:
+        logger.warning(f"[MP3] Oldindan tayyorlash xatosi: {e}")
 
 
 @router.message(StateFilter(None), ~F.text.startswith("/"))
@@ -284,7 +336,6 @@ async def handle_video_link(message: Message, state: FSMContext):
 
     # Video faylni MP3 olish uchun keshlash (5 daqiqa)
     mp3_key = str(hash(url) % 100000000)
-    # Faylni nusxalash (chunki asl fayl cleanup_file da o'chiriladi)
     cache_dir = os.path.join(tempfile.gettempdir(), "mp3_cache")
     os.makedirs(cache_dir, exist_ok=True)
     cached_file = os.path.join(cache_dir, f"{mp3_key}.mp4")
@@ -340,6 +391,10 @@ async def handle_video_link(message: Message, state: FSMContext):
     finally:
         cleanup_file(file_path)
 
+    # Fon rejimida MP3 tayyorlash — foydalanuvchi tugmasini bosganda tayyor bo'ladi
+    if cached_file and os.path.exists(cached_file):
+        asyncio.create_task(_pre_extract_mp3(mp3_key, cached_file, info or {}))
+
     # Bazaga yozish
     try:
         session_factory = await get_session_factory()
@@ -360,7 +415,7 @@ async def handle_video_link(message: Message, state: FSMContext):
 
 @router.callback_query(F.data.startswith("mp3_"))
 async def handle_mp3_request(callback: CallbackQuery, state: FSMContext):
-    """MP3 tugmasi → audio yuklash (keshlangan fayldan yoki qayta yuklab)"""
+    """MP3 tugmasi → audio yuklash (oldindan tayyorlangan yoki keshlangan fayldan)"""
     key = callback.data.replace("mp3_", "")
     cache_data = _url_cache.get(key)
 
@@ -379,7 +434,31 @@ async def handle_mp3_request(callback: CallbackQuery, state: FSMContext):
     url = cache_data["url"]
     file_path_to_cleanup = None
 
-    # 1-USUL: Keshlangan video fayldan ffmpeg bilan audio ajratish (1-3 soniya)
+    # 1-USUL: Oldindan tayyorlangan MP3 fayl (eng tez — 0 soniya kutish)
+    pre_mp3 = _mp3_ready_cache.get(key)
+    if pre_mp3 and os.path.exists(pre_mp3):
+        logger.info(f"[MP3] Oldindan tayyorlangan fayl topildi: {pre_mp3}")
+        cached_video = _video_file_cache.get(key)
+        info = cached_video.get("info", {}) if cached_video else {}
+        title = info.get("title", "Audio")
+        safe_title = "".join(c for c in title if c.isalnum() or c in " -_").strip()[:50]
+        caption = f"🤖 {_BOT_LINK}"
+
+        try:
+            await callback.message.answer_audio(
+                audio=FSInputFile(pre_mp3),
+                caption=caption,
+                title=safe_title,
+            )
+        except Exception:
+            await callback.message.answer_document(
+                document=FSInputFile(pre_mp3),
+                caption=caption,
+            )
+        logger.info("[MP3] Oldindan tayyorlangan fayl muvaffaqiyatli yuborildi!")
+        return
+
+    # 2-USUL: Keshlangan video fayldan ffmpeg bilan audio ajratish (1-3 soniya)
     cached_video = _video_file_cache.get(key)
     if cached_video and os.path.exists(cached_video.get("file_path", "")):
         video_path = cached_video["file_path"]
@@ -391,17 +470,10 @@ async def handle_mp3_request(callback: CallbackQuery, state: FSMContext):
                 mp3_dir = tempfile.mkdtemp()
                 mp3_path = os.path.join(mp3_dir, f"{key}.mp3")
 
-                result = subprocess.run(
-                    ["ffmpeg", "-i", video_path,
-                     "-vn",  # Video yo'q
-                     "-acodec", "libmp3lame",
-                     "-ab", "192k",
-                     "-ar", "44100",
-                     "-y", mp3_path],
-                    capture_output=True, timeout=30
-                )
+                # asyncio.to_thread — event loop ni bloklamaydi
+                success = await asyncio.to_thread(_extract_mp3_sync, video_path, mp3_path)
 
-                if result.returncode == 0 and os.path.exists(mp3_path) and os.path.getsize(mp3_path) > 0:
+                if success:
                     file_path_to_cleanup = mp3_path
                     title = info.get("title", "Audio") if info else "Audio"
                     safe_title = "".join(c for c in title if c.isalnum() or c in " -_").strip()[:50]
@@ -420,15 +492,13 @@ async def handle_mp3_request(callback: CallbackQuery, state: FSMContext):
                         )
 
                     logger.info("[MP3] Keshlangan fayldan muvaffaqiyatli ajratildi!")
-                    return  # Tayyor!
+                    return
                 else:
-                    logger.warning(f"[MP3] ffmpeg audio ajratish xatosi: {result.stderr.decode()[:200] if result.stderr else 'n/a'}")
-            except subprocess.TimeoutExpired:
-                logger.warning("[MP3] ffmpeg timeout")
+                    logger.warning("[MP3] ffmpeg audio ajratish xatosi")
             except Exception as e:
                 logger.warning(f"[MP3] ffmpeg xatosi: {e}")
 
-    # 2-USUL: Qayta yuklash (sekin, lekin ishonchli)
+    # 3-USUL: Qayta yuklash (sekin, lekin ishonchli)
     loading_msg = await callback.message.answer("⏳")
     try:
         result = await download_video(url, "720", audio_only=True)

@@ -24,14 +24,6 @@ class AdminStates(StatesGroup):
     # Remove channel
     channel_remove = State()
 
-    # Promo code
-    promo_days = State()
-    promo_max_uses = State()
-
-    # Premium grant
-    premium_user_id = State()
-    premium_days = State()
-
     # Ban
     ban_user_id = State()
     ban_reason = State()
@@ -41,11 +33,6 @@ class AdminStates(StatesGroup):
 
     # Settings
     settings_menu = State()
-
-
-class PremiumStates(StatesGroup):
-    """Premium flow FSM states"""
-    promo_code = State()
 
 
 class DownloadStates(StatesGroup):

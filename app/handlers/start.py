@@ -23,7 +23,7 @@ router = Router()
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
-    """Handle /start command"""
+    """Handle /start command — bot haqida ma'lumot + menyu"""
     await state.clear()
 
     # Parse referral code from deep link
@@ -71,7 +71,7 @@ async def cmd_start(message: Message, state: FSMContext):
         await message.answer(text, reply_markup=kb, parse_mode="HTML")
         return
 
-    # Show welcome
+    # Show welcome — bot haqida ma'lumot
     is_admin = config.bot.is_admin(message.from_user.id)
     text = format_welcome()
     kb = main_menu_kb()
@@ -128,27 +128,4 @@ async def check_subscription(callback: CallbackQuery):
         from app.utils.formatter import format_subscription_required
         text = format_subscription_required(unsubscribed)
         kb = subscription_check_kb(unsubscribed)
-        await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-
-
-@router.callback_query(F.data == "stats")
-async def callback_stats(callback: CallbackQuery):
-    """Show user's own statistics"""
-    session_factory = await get_session_factory()
-    async with session_factory() as session:
-        user_repo = UserRepository(session)
-        user = await user_repo.get_by_id(callback.from_user.id)
-
-        if not user:
-            await callback.answer("❌ Foydalanuvchi topilmadi", show_alert=True)
-            return
-
-        from app.utils.formatter import bold, separator, code
-        text = (
-            f"📊 {bold('Statistika')}\n\n"
-            f"{separator()}\n\n"
-            f"📥 Yuklangan videolar: {bold(str(user.downloads_count))}\n"
-            f"🔄 Taklif qilingan do'stlar: {bold(str(user.referrals_count))}\n"
-        )
-        kb = back_to_main_kb()
         await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")

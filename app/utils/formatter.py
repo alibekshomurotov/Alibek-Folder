@@ -1,4 +1,4 @@
-"""Text Formatter - Premium message formatting utilities"""
+"""Text Formatter - Message formatting utilities"""
 
 from app.config import THEME
 
@@ -29,7 +29,7 @@ def separator() -> str:
 
 
 def header(emoji: str, title: str) -> str:
-    """Create a premium header"""
+    """Create a header"""
     return f"{emoji} {bold(title)}"
 
 
@@ -53,19 +53,15 @@ def warning_message(text: str) -> str:
     return f"⚠️ {text}"
 
 
-def premium_badge() -> str:
-    """Premium star badge"""
-    return "⭐"
-
-
 def format_welcome() -> str:
-    """Format the welcome/start message"""
+    """Format the welcome/start message — bot haqida ma'lumot"""
     return (
         f"🎬 {bold('Video Downloader Pro')}\n\n"
         f"Ijtimoiy tarmoqlardan video yuklab olishning eng tez usuli.\n\n"
         f"📥 Link yuboring va videoni oling.\n\n"
         f"⚡ Tez yuklash\n"
         f"🎬 HD sifat\n"
+        f"🎵 MP3 yuklash\n"
         f"🔒 Xavfsiz"
     )
 
@@ -154,11 +150,7 @@ def format_video_caption(info: dict, quality: str = "HD") -> str:
 
 
 def format_profile(user) -> str:
-    """Format user profile message"""
-    premium_status = "⭐ Premium" if user.is_premium_active else "🆓 Bepul"
-    if user.is_premium_active and user.premium_until:
-        premium_status += f" ({user.premium_until.strftime('%d.%m.%Y')} gacha)"
-
+    """Format user profile message — premium ma'lumotlari olib tashlangan"""
     text = (
         f"👤 {bold('Profil')}\n\n"
         f"{separator()}\n\n"
@@ -167,8 +159,7 @@ def format_profile(user) -> str:
         f"📱 Username: @{user.username or 'N/A'}\n"
         f"📅 Ro'yxatdan o'tgan: {user.registered_at.strftime('%d.%m.%Y')}\n"
         f"📥 Yuklangan: {bold(str(user.downloads_count))} video\n"
-        f"🔄 Takliflar: {bold(str(user.referrals_count))} kishi\n"
-        f"💎 Holat: {premium_status}\n\n"
+        f"🔄 Takliflar: {bold(str(user.referrals_count))} kishi\n\n"
         f"{separator()}\n\n"
         f"🔗 Taklif linki:\n{code(user.referral_link)}"
     )
@@ -176,9 +167,9 @@ def format_profile(user) -> str:
 
 
 def format_admin_stats(total_users: int, today_users: int, total_downloads: int,
-                       today_downloads: int, premium_count: int,
-                       total_channels: int, platform_stats: dict) -> str:
-    """Format admin statistics message"""
+                       today_downloads: int, total_channels: int,
+                       platform_stats: dict) -> str:
+    """Format admin statistics message — premium count olib tashlangan"""
     text = (
         f"📊 {bold('Statistika')}\n\n"
         f"{separator()}\n\n"
@@ -186,7 +177,6 @@ def format_admin_stats(total_users: int, today_users: int, total_downloads: int,
         f"🆕 Bugungi foydalanuvchilar: {bold(str(today_users))}\n\n"
         f"📥 Jami yuklashlar: {bold(str(total_downloads))}\n"
         f"📥 Bugungi yuklashlar: {bold(str(today_downloads))}\n\n"
-        f"⭐ Premiumlar: {bold(str(premium_count))}\n"
         f"📺 Kanallar: {bold(str(total_channels))}\n\n"
     )
 
@@ -197,25 +187,6 @@ def format_admin_stats(total_users: int, today_users: int, total_downloads: int,
             text += f"  • {platform}: {count}\n"
 
     return text
-
-
-def format_premium_info() -> str:
-    """Format premium information message"""
-    return (
-        f"⭐ {bold('Premium')}\n\n"
-        f"{separator()}\n\n"
-        f"Premium foydalanuvchilar imtiyozlari:\n\n"
-        f"⚡ Navbatsiz yuklash\n"
-        f"🚀 Tezroq server\n"
-        f"🎥 Maksimal sifat (1080p+)\n"
-        f"🔓 Reklamasiz foydalanish\n"
-        f"🎵 MP3 yuklash\n\n"
-        f"{separator()}\n\n"
-        f"🎁 {bold('Bepul Premium olish:')}\n\n"
-        f"👥 5 ta do'st taklif qiling = 3 kun premium\n"
-        f"👥 20 ta do'st taklif qiling = 30 kun premium\n\n"
-        f"🔑 Promo kodga egasiz? Quyidagi tugmani bosing:"
-    )
 
 
 def format_help() -> str:
@@ -235,8 +206,6 @@ def format_help() -> str:
         f"  👻 Snapchat\n"
         f"  🧵 Threads\n\n"
         f"{separator()}\n\n"
-        f"🎥 {bold('Sifat tanlash:')}\n"
-        f"Video topilgandan so'ng siz sifatni tanlashingiz mumkin.\n\n"
         f"🎵 {bold('MP3 yuklash:')}\n"
         f"Video tagidagi MP3 tugmasini bosib audio yuklab olishingiz mumkin."
     )
@@ -276,7 +245,7 @@ def format_error(error_type: str) -> str:
         ),
         "file_too_large": (
             f"⚠️ {bold('Video hajmi juda katta.')}\n\n"
-            f"Pastroq sifatni tanlang yoki Premiumga o'ting."
+            f"Pastroq sifatni tanlang."
         ),
         "banned": (
             f"🚫 {bold('Siz ban qilingansiz.')}\n\n"
@@ -285,10 +254,6 @@ def format_error(error_type: str) -> str:
         "rate_limit": (
             f"⏳ {bold('Juda ko\'p so\'rov.')}\n\n"
             f"Biroz kuting va qayta urinib ko'ring."
-        ),
-        "premium_required": (
-            f"⭐ {bold('Bu funksiya faqat Premium uchun.')}\n\n"
-            f"Premium olish uchun profil bo'limiga o'ting."
         ),
     }
     return errors.get(error_type, f"❌ Noma'lum xatolik yuz berdi.")

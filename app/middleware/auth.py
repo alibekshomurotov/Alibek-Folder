@@ -55,7 +55,7 @@ class AuthMiddleware(BaseMiddleware):
 
         # For specific callbacks, skip subscription check
         if isinstance(event, CallbackQuery):
-            skip_callbacks = {"check_subscription", "back_main", "help", "profile", "stats"}
+            skip_callbacks = {"check_subscription", "back_main", "help", "profile"}
             if event.data in skip_callbacks:
                 return await handler(event, data)
 

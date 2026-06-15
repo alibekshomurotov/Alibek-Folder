@@ -6,8 +6,7 @@ from aiogram import Router, F
 from aiogram.types import CallbackQuery
 from aiogram.fsm.context import FSMContext
 
-from app.keyboards.inline import admin_menu_kb, back_to_main_kb
-from app.utils.formatter import bold
+from app.keyboards.inline import back_to_main_kb
 
 logger = logging.getLogger(__name__)
 

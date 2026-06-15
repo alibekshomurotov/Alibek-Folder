@@ -28,7 +28,6 @@ class AdminService:
             today_users = await user_repo.get_today_count()
             total_downloads = await download_repo.get_total_count()
             today_downloads = await download_repo.get_today_count()
-            premium_count = await user_repo.get_premium_count()
             total_channels = await channel_repo.get_count()
             platform_stats = await download_repo.get_platform_stats()
 
@@ -37,7 +36,6 @@ class AdminService:
                 "today_users": today_users,
                 "total_downloads": total_downloads,
                 "today_downloads": today_downloads,
-                "premium_count": premium_count,
                 "total_channels": total_channels,
                 "platform_stats": platform_stats,
             }
