@@ -5,7 +5,9 @@ import subprocess
 import tempfile
 import time
 from typing import Optional, Dict
+from urllib.parse import quote_plus
 
+import aiohttp
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
@@ -45,18 +47,93 @@ async def recognize_audio(file_path: str) -> dict | None:
 
 
 async def search_song(query: str, limit: int = 5) -> list:
-    """Shazam Search orqali qo'shiq nomi bo'yicha qidirish"""
-    if Shazam is None:
-        logger.error("[Music] shazamio kutubxonasi o'rnatilmagan")
-        return []
+    """Shazam orqali qo'shiq nomi bo'yicha qidirish.
+
+    1-usul: shazamio kutubxonasi orqali
+    2-usul: to'g'ridan-to'g'ri Shazam API ga HTTP so'rov (fallback)
+    """
+    tracks = []
+
+    # 1-usul: shazamio kutubxonasi
+    if Shazam is not None:
+        try:
+            shazam = Shazam()
+            results = await shazam.search_track(query=query, limit=limit)
+            tracks = results.get("tracks", {}).get("hits", [])
+            if tracks:
+                logger.info(f"[Music] Shazam search (shazamio): {len(tracks)} ta natija")
+                return tracks
+        except Exception as e:
+            logger.warning(f"[Music] shazamio search xatosi: {e}")
+
+    # 2-usul: to'g'ridan-to'g'ri Shazam API
     try:
-        shazam = Shazam()
-        results = await shazam.search_track(query=query, limit=limit)
-        tracks = results.get("tracks", {}).get("hits", [])
-        return tracks
+        tracks = await _shazam_api_search(query, limit)
+        if tracks:
+            logger.info(f"[Music] Shazam search (API): {len(tracks)} ta natija")
+            return tracks
     except Exception as e:
-        logger.error(f"[Music] Shazam search xatosi: {e}")
-        return []
+        logger.warning(f"[Music] Shazam API search xatosi: {e}")
+
+    logger.warning(f"[Music] Qidiruv natijasiz: '{query}'")
+    return []
+
+
+async def _shazam_api_search(query: str, limit: int = 5) -> list:
+    """To'g'ridan-to'g'ri Shazam API ga HTTP so'rov yuborish (fallback)"""
+    encoded_query = quote_plus(query)
+    url = (
+        f"https://www.shazam.com/services/amapi-ingress/discovery-search/v1/multisearch"
+        f"?query={encoded_query}&searchTypes=SONGS&limit={limit}"
+    )
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json",
+        "Referer": "https://www.shazam.com/",
+        "Origin": "https://www.shazam.com",
+    }
+
+    timeout = aiohttp.ClientTimeout(total=10)
+
+    async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+        async with session.get(url) as response:
+            if response.status != 200:
+                logger.warning(f"[Music] Shazam API status: {response.status}")
+                return []
+
+            try:
+                data = await response.json()
+            except Exception:
+                text = await response.text()
+                logger.warning(f"[Music] Shazam API JSON xatosi: {text[:200]}")
+                return []
+
+    # Natijalarni shazamio formatiga o'tkazish
+    tracks = []
+    songs = data.get("tracks", {}).get("hits", [])
+
+    # Agar "tracks.hits" bo'sh bo'lsa, boshqa formatni sinab ko'rish
+    if not songs:
+        # Amagi format
+        results = data.get("results", [])
+        if not results:
+            return []
+        for item in results[:limit]:
+            track_data = item.get("track", item)
+            tracks.append({
+                "track": {
+                    "title": track_data.get("title", ""),
+                    "subtitle": track_data.get("subtitle", ""),
+                    "hub": track_data.get("hub", {}),
+                    "sections": track_data.get("sections", []),
+                    "share": track_data.get("share", {}),
+                    "images": track_data.get("images", {}),
+                }
+            })
+        return tracks
+
+    return songs
 
 
 def _extract_youtube_url(result: dict) -> str:
