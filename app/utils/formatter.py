@@ -1,5 +1,3 @@
-"""Text Formatter - Message formatting utilities"""
-
 from app.config import THEME
 
 
@@ -149,8 +147,13 @@ def format_video_caption(info: dict, quality: str = "HD") -> str:
     )
 
 
-def format_profile(user) -> str:
-    """Format user profile message — premium ma'lumotlari olib tashlangan"""
+def format_profile(user, bot_username: str = None) -> str:
+    """Format user profile message — bot_username berilsa shundan referral link yasaydi"""
+    if bot_username:
+        referral_link = f"https://t.me/{bot_username}?start=ref_{user.referral_code}"
+    else:
+        referral_link = user.referral_link
+
     text = (
         f"👤 {bold('Profil')}\n\n"
         f"{separator()}\n\n"
@@ -161,7 +164,7 @@ def format_profile(user) -> str:
         f"📥 Yuklangan: {bold(str(user.downloads_count))} video\n"
         f"🔄 Takliflar: {bold(str(user.referrals_count))} kishi\n\n"
         f"{separator()}\n\n"
-        f"🔗 Taklif linki:\n{code(user.referral_link)}"
+        f"🔗 Taklif linki:\n{code(referral_link)}"
     )
     return text
 
