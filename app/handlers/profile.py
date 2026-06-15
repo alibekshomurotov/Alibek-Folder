@@ -1,5 +1,3 @@
-"""Profile Handler - User profile management"""
-
 import logging
 
 from aiogram import Router, F

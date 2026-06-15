@@ -1,10 +1,8 @@
-"""Start Handler - /start command and main menu"""
-
 import logging
 from typing import Optional
 
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, ReplyKeyboardRemove
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 
@@ -12,7 +10,6 @@ from app.config import config
 from app.database.connection import get_session_factory
 from app.database.repositories.user_repo import UserRepository
 from app.keyboards.inline import main_menu_kb, back_to_main_kb
-from app.keyboards.reply import main_reply_kb
 from app.utils.formatter import format_welcome, format_help
 from app.services.subscription_service import SubscriptionService
 
@@ -23,7 +20,7 @@ router = Router()
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
-    """Handle /start command — bot haqida ma'lumot + menyu"""
+    """Handle /start command — bot haqida ma'lumot + inline menyu"""
     await state.clear()
 
     # Parse referral code from deep link
@@ -68,17 +65,19 @@ async def cmd_start(message: Message, state: FSMContext):
         from app.utils.formatter import format_subscription_required
         text = format_subscription_required(unsubscribed)
         kb = subscription_check_kb(unsubscribed)
-        await message.answer(text, reply_markup=kb, parse_mode="HTML")
+        await message.answer(text, reply_markup=ReplyKeyboardRemove(), parse_mode="HTML")
         return
 
-    # Show welcome — bot haqida ma'lumot
-    is_admin = config.bot.is_admin(message.from_user.id)
+    # Show welcome — bot haqida ma'lumot + inline tugmalar
     text = format_welcome()
     kb = main_menu_kb()
-    reply_kb = main_reply_kb(is_admin=is_admin)
 
-    await message.answer(text, reply_markup=reply_kb, parse_mode="HTML")
-    await message.answer("📱 Quyidagi menyu orqali botdan foydalaning:", reply_markup=kb)
+    # Admin ga pastda admin panel tugmasi, oddiy foydalanuvchiga hech narsa
+    if config.bot.is_admin(message.from_user.id):
+        from app.keyboards.reply import admin_reply_kb
+        await message.answer(text, reply_markup=admin_reply_kb(), parse_mode="HTML")
+    else:
+        await message.answer(text, reply_markup=ReplyKeyboardRemove(), parse_mode="HTML")
 
 
 @router.message(Command("help"))
@@ -93,10 +92,8 @@ async def cmd_help(message: Message):
 async def back_to_main(callback: CallbackQuery, state: FSMContext):
     """Return to main menu"""
     await state.clear()
-    is_admin = config.bot.is_admin(callback.from_user.id)
     text = format_welcome()
     kb = main_menu_kb()
-    reply_kb = main_reply_kb(is_admin=is_admin)
 
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
 
@@ -117,10 +114,8 @@ async def check_subscription(callback: CallbackQuery):
     )
 
     if is_subscribed or config.bot.is_admin(callback.from_user.id):
-        is_admin = config.bot.is_admin(callback.from_user.id)
         text = format_welcome()
         kb = main_menu_kb()
-        reply_kb = main_reply_kb(is_admin=is_admin)
 
         await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     else:

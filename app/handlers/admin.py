@@ -1,5 +1,3 @@
-"""Admin Handler - Admin panel (premium va promo olib tashlangan)"""
-
 import logging
 import os
 from typing import Optional
@@ -39,9 +37,19 @@ def is_admin(user_id: int) -> bool:
 
 @router.message(Command("admin"))
 async def cmd_admin(message: Message, state: FSMContext):
-    """Open admin panel"""
+    """Open admin panel — /admin buyrug'i"""
+    await _open_admin_panel(message, state)
+
+
+@router.message(F.text == "🔧 Admin panel")
+async def msg_admin_panel(message: Message, state: FSMContext):
+    """Open admin panel — reply keyboard tugmasi"""
+    await _open_admin_panel(message, state)
+
+
+async def _open_admin_panel(message: Message, state: FSMContext):
+    """Admin panelni ochish"""
     if not is_admin(message.from_user.id):
-        await message.answer("❌ Siz admin emassiz.")
         return
 
     await state.clear()
