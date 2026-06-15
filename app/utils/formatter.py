@@ -1,66 +1,63 @@
+"""Text Formatter - Message formatting utilities"""
+
 from app.config import THEME
 
 
 def bold(text: str) -> str:
-    """Bold text"""
     return f"<b>{text}</b>"
 
 
 def italic(text: str) -> str:
-    """Italic text"""
     return f"<i>{text}</i>"
 
 
 def code(text: str) -> str:
-    """Code text"""
     return f"<code>{text}</code>"
 
 
 def link(text: str, url: str) -> str:
-    """Create a link"""
     return f'<a href="{url}">{text}</a>'
 
 
 def separator() -> str:
-    """Glassmorphism-style separator"""
     return "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄"
 
 
 def header(emoji: str, title: str) -> str:
-    """Create a header"""
     return f"{emoji} {bold(title)}"
 
 
 def info_line(label: str, value: str) -> str:
-    """Create an info line with label and value"""
     return f"  {italic(label)}: {value}"
 
 
 def success_message(text: str) -> str:
-    """Format a success message"""
     return f"✅ {text}"
 
 
 def error_message(text: str) -> str:
-    """Format an error message"""
     return f"❌ {text}"
 
 
 def warning_message(text: str) -> str:
-    """Format a warning message"""
     return f"⚠️ {text}"
 
 
 def format_welcome() -> str:
-    """Format the welcome/start message — bot haqida ma'lumot"""
+    """Format the welcome/start message — barcha ma'lumot shu yerda"""
     return (
         f"🎬 {bold('Video Downloader Pro')}\n\n"
-        f"Ijtimoiy tarmoqlardan video yuklab olishning eng tez usuli.\n\n"
-        f"📥 Link yuboring va videoni oling.\n\n"
-        f"⚡ Tez yuklash\n"
-        f"🎬 HD sifat\n"
-        f"🎵 MP3 yuklash\n"
-        f"🔒 Xavfsiz"
+        f"📥 Link yuboring va videoni yuklab oling.\n\n"
+        f"{separator()}\n\n"
+        f"📱 {bold('Platformalar:')}\n"
+        f"  🎵 TikTok  •  📸 Instagram  •  ▶️ YouTube\n"
+        f"  📘 Facebook  •  🐦 X  •  📌 Pinterest\n"
+        f"  👻 Snapchat  •  🧵 Threads\n\n"
+        f"🎵 {bold('MP3 yuklash:')} Video tagidagi MP3 tugmasini bosing.\n\n"
+        f"🎶 {bold('Musiqa tanish:')} 5-10 soniyalik audio yuboring yoki\n"
+        f"qo'shiq nomini yozing — bot topib beradi!\n\n"
+        f"{separator()}\n\n"
+        f"⚡ Tez yuklash  •  🎬 HD sifat  •  🔒 Xavfsiz"
     )
 
 
@@ -89,7 +86,6 @@ def format_video_info(info: dict, platform: str) -> str:
         f"{separator()}\n\n"
     )
 
-    # Platform
     platform_names = {
         "tiktok": "🎵 TikTok",
         "instagram": "📸 Instagram",
@@ -103,22 +99,18 @@ def format_video_info(info: dict, platform: str) -> str:
     if platform in platform_names:
         text += f"📱 Platforma: {platform_names[platform]}\n"
 
-    # Duration
     duration = info.get("duration")
     if duration:
         text += f"⏱ Davomiylik: {format_duration(int(duration))}\n"
 
-    # Views
     views = info.get("view_count")
     if views:
         text += f"👀 Ko'rishlar: {format_view_count(views)}\n"
 
-    # Likes
     likes = info.get("like_count")
     if likes:
         text += f"❤️ Layklar: {format_view_count(likes)}\n"
 
-    # Upload date
     upload_date = info.get("upload_date")
     if upload_date:
         from datetime import datetime
@@ -148,7 +140,7 @@ def format_video_caption(info: dict, quality: str = "HD") -> str:
 
 
 def format_profile(user, bot_username: str = None) -> str:
-    """Format user profile message — bot_username berilsa shundan referral link yasaydi"""
+    """Format user profile message"""
     if bot_username:
         referral_link = f"https://t.me/{bot_username}?start=ref_{user.referral_code}"
     else:
@@ -172,7 +164,7 @@ def format_profile(user, bot_username: str = None) -> str:
 def format_admin_stats(total_users: int, today_users: int, total_downloads: int,
                        today_downloads: int, total_channels: int,
                        platform_stats: dict) -> str:
-    """Format admin statistics message — premium count olib tashlangan"""
+    """Format admin statistics message"""
     text = (
         f"📊 {bold('Statistika')}\n\n"
         f"{separator()}\n\n"

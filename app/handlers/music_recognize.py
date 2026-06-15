@@ -2,9 +2,14 @@ import logging
 import os
 import tempfile
 
-from aiogram import Router, F, Bot
-from aiogram.types import Message, FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram import Router, F
+from aiogram.types import Message
 from aiogram.fsm.context import FSMContext
+
+try:
+    from shazamio import Shazam
+except ImportError:
+    Shazam = None  # type: ignore[assignment, misc]
 
 from app.config import config
 from app.services.subscription_service import SubscriptionService
@@ -14,7 +19,9 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 
-async def _recognize_audio(file_path: str) -> dict | None:
+# ============ Shazam yordamchi funksiyalar ============
+
+async def recognize_audio(file_path: str) -> dict | None:
     """Shazamio orqali audioni tanish"""
     try:
         from shazamio import Shazam
@@ -26,8 +33,23 @@ async def _recognize_audio(file_path: str) -> dict | None:
         return None
 
 
-def _format_music_result(result: dict) -> str | None:
-    """Shazam natijasini chiroyli formatga keltirish"""
+async def search_song(query: str, limit: int = 5) -> list:
+    """Shazam Search orqali qo'shiq nomi bo'yicha qidirish"""
+    if Shazam is None:
+        logger.error("[Music] shazamio kutubxonasi o'rnatilmagan")
+        return []
+    try:
+        shazam = Shazam()
+        results = await shazam.search_track(query=query, limit=limit)
+        tracks = results.get("tracks", {}).get("hits", [])
+        return tracks
+    except Exception as e:
+        logger.error(f"[Music] Shazam search xatosi: {e}")
+        return []
+
+
+def format_music_result(result: dict) -> str | None:
+    """Shazam audio tanish natijasini formatlash"""
     track = result.get("track")
     if not track:
         return None
@@ -42,7 +64,7 @@ def _format_music_result(result: dict) -> str | None:
         f"🎶 <b>Qo'shiq:</b> {title}\n"
     )
 
-    # Album
+    # Album va metadata
     sections = track.get("sections", [])
     for section in sections:
         if section.get("type") == "SONG":
@@ -58,13 +80,11 @@ def _format_music_result(result: dict) -> str | None:
                         "Genre": "🎭",
                         "Key": "🎹",
                         "Bpm": "🥁",
-                        "Time Signature": "📏",
                     }
                     emoji = emoji_map.get(mtitle, "📌")
                     text += f"{emoji} <b>{mtitle}:</b> {mtext}\n"
 
     # YouTube link
-    urlsh = track.get("url", "")
     hub = track.get("hub", {})
     providers = hub.get("providers", [])
     yt_link = ""
@@ -79,20 +99,12 @@ def _format_music_result(result: dict) -> str | None:
         if yt_link:
             break
 
-    # Apple Music / Spotify link
-    apple_link = ""
-    for section in sections:
-        if section.get("type") == "VIDEO":
-            yt_link = yt_link or section.get("youtubeurl", "")
-        if section.get("type") == "LYRICS":
-            pass  # lyrics mavjud, lekin ko'rsatmaymiz
-
     # Streaming links
     streaming_text = ""
     if yt_link:
-        streaming_text += f"\n▶️ <b>YouTube:</b> {yt_link}\n"
+        streaming_text += f"▶️ <b>YouTube:</b> {yt_link}\n"
 
-    # Apple Music link from hub
+    # Apple Music link
     if hub.get("type") == "MUSIC":
         options = hub.get("options", [])
         for opt in options:
@@ -101,48 +113,105 @@ def _format_music_result(result: dict) -> str | None:
                 if apple_link:
                     streaming_text += f"🍎 <b>Apple Music:</b> {apple_link}\n"
 
-    # Spotify link from track
-    spotify_link = ""
-    for section in sections:
-        if section.get("type") == "VIDEO":
-            pass
-    # Check for external links
-    external_urls = track.get("share", {})
-    if isinstance(external_urls, dict):
-        share_href = external_urls.get("href", "")
+    # Shazam link
+    share = track.get("share", {})
+    if isinstance(share, dict):
+        share_href = share.get("href", "")
         if share_href:
             streaming_text += f"🔗 <b>Shazam:</b> {share_href}\n"
 
     if streaming_text:
-        text += f"\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n🎵 <b>Eshtish:</b>\n{streaming_text}"
+        text += f"\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n🎵 <b>Eshitish:</b>\n{streaming_text}"
 
     return text
 
 
+def format_search_results(query: str, tracks: list) -> str:
+    """Qidiruv natijalarini formatlash"""
+    if not tracks:
+        return (
+            f"🔍 <b>Qidiruv:</b> {query}\n\n"
+            f"❌ <b>Hech narsa topilmadi.</b>\n\n"
+            f"💡 Boshqa nom bilan qidirib ko'ring."
+        )
+
+    text = (
+        f"🔍 <b>Qidiruv:</b> {query}\n\n"
+        f"🎵 <b>Natijalar:</b>\n\n"
+    )
+
+    for i, hit in enumerate(tracks[:5], 1):
+        track = hit.get("track", hit)
+        title = track.get("title", "Noma'lum")
+        subtitle = track.get("subtitle", "")
+
+        text += f"<b>{i}.</b> 🎤 {subtitle} — 🎶 {title}\n"
+
+        # Album / Released
+        sections = track.get("sections", [])
+        for section in sections:
+            if section.get("type") == "SONG":
+                metadata = section.get("metadata", [])
+                for meta in metadata:
+                    mtitle = meta.get("title", "")
+                    mtext = meta.get("text", "")
+                    if mtitle in ("Album", "Released") and mtext:
+                        emoji = "💿" if mtitle == "Album" else "📅"
+                        text += f"    {emoji} {mtext}\n"
+
+        # YouTube link
+        hub = track.get("hub", {})
+        providers = hub.get("providers", [])
+        for provider in providers:
+            if provider.get("type") == "YOUTUBE":
+                actions = provider.get("actions", [])
+                for action in actions:
+                    uri = action.get("uri", "")
+                    if "youtube.com" in uri or "youtu.be" in uri:
+                        text += f"    ▶️ {uri}\n"
+                        break
+                break
+
+        text += "\n"
+
+    return text
+
+
+# ============ Obuna tekshirish ============
+
+async def _check_subscription(message: Message) -> bool:
+    """Obuna tekshirish. True = davom etish mumkin"""
+    if config.bot.is_admin(message.from_user.id):
+        return True
+
+    is_subscribed, unsubscribed = await SubscriptionService.is_subscribed(
+        message.bot, message.from_user.id
+    )
+    if not is_subscribed:
+        from app.keyboards.inline import subscription_check_kb
+        from app.utils.formatter import format_subscription_required
+        text = format_subscription_required(unsubscribed)
+        kb = subscription_check_kb(unsubscribed)
+        await message.answer(text, reply_markup=kb, parse_mode="HTML")
+        return False
+
+    return True
+
+
+# ============ Audio handler ============
+
 @router.message(F.audio)
 async def handle_audio_message(message: Message, state: FSMContext):
     """Foydalanuvchi audio yuborsa — qo'shiqni tanib berish"""
-    # Obuna tekshirish
-    if not config.bot.is_admin(message.from_user.id):
-        is_subscribed, unsubscribed = await SubscriptionService.is_subscribed(
-            message.bot, message.from_user.id
-        )
-        if not is_subscribed:
-            from app.keyboards.inline import subscription_check_kb
-            from app.utils.formatter import format_subscription_required
-            text = format_subscription_required(unsubscribed)
-            kb = subscription_check_kb(unsubscribed)
-            await message.answer(text, reply_markup=kb, parse_mode="HTML")
-            return
+    if not await _check_subscription(message):
+        return
 
-    # Audio faylni yuklab olish
     loading_msg = await message.answer("🎵 <b>Qo'shiq aniqlanmoqda...</b>", parse_mode="HTML")
 
     temp_dir = tempfile.mkdtemp()
     audio_path = os.path.join(temp_dir, "audio.ogg")
 
     try:
-        # Telegram'dan audio faylni yuklab olish
         file_id = message.audio.file_id
         file = await message.bot.get_file(file_id)
 
@@ -156,8 +225,7 @@ async def handle_audio_message(message: Message, state: FSMContext):
             await loading_msg.edit_text("❌ <b>Audio fayl bo'sh.</b>", parse_mode="HTML")
             return
 
-        # Shazam orqali tanish
-        result = await _recognize_audio(audio_path)
+        result = await recognize_audio(audio_path)
 
         if not result:
             await loading_msg.edit_text(
@@ -167,7 +235,7 @@ async def handle_audio_message(message: Message, state: FSMContext):
             )
             return
 
-        formatted = _format_music_result(result)
+        formatted = format_music_result(result)
 
         if not formatted:
             await loading_msg.edit_text(
@@ -177,7 +245,6 @@ async def handle_audio_message(message: Message, state: FSMContext):
             )
             return
 
-        # Natijani yuborish
         await loading_msg.edit_text(formatted, parse_mode="HTML")
 
     except Exception as e:
@@ -190,7 +257,6 @@ async def handle_audio_message(message: Message, state: FSMContext):
         except Exception:
             pass
     finally:
-        # Tozalash
         try:
             if os.path.exists(audio_path):
                 os.remove(audio_path)
@@ -199,30 +265,20 @@ async def handle_audio_message(message: Message, state: FSMContext):
             pass
 
 
+# ============ Voice handler ============
+
 @router.message(F.voice)
 async def handle_voice_message(message: Message, state: FSMContext):
     """Foydalanuvchi voice message yuborsa — qo'shiqni tanib berish"""
-    # Obuna tekshirish
-    if not config.bot.is_admin(message.from_user.id):
-        is_subscribed, unsubscribed = await SubscriptionService.is_subscribed(
-            message.bot, message.from_user.id
-        )
-        if not is_subscribed:
-            from app.keyboards.inline import subscription_check_kb
-            from app.utils.formatter import format_subscription_required
-            text = format_subscription_required(unsubscribed)
-            kb = subscription_check_kb(unsubscribed)
-            await message.answer(text, reply_markup=kb, parse_mode="HTML")
-            return
+    if not await _check_subscription(message):
+        return
 
-    # Voice faylni yuklab olish
     loading_msg = await message.answer("🎵 <b>Qo'shiq aniqlanmoqda...</b>", parse_mode="HTML")
 
     temp_dir = tempfile.mkdtemp()
     voice_path = os.path.join(temp_dir, "voice.ogg")
 
     try:
-        # Telegram'dan voice faylni yuklab olish
         file_id = message.voice.file_id
         file = await message.bot.get_file(file_id)
 
@@ -236,8 +292,7 @@ async def handle_voice_message(message: Message, state: FSMContext):
             await loading_msg.edit_text("❌ <b>Ovozli xabar bo'sh.</b>", parse_mode="HTML")
             return
 
-        # Shazam orqali tanish
-        result = await _recognize_audio(voice_path)
+        result = await recognize_audio(voice_path)
 
         if not result:
             await loading_msg.edit_text(
@@ -247,7 +302,7 @@ async def handle_voice_message(message: Message, state: FSMContext):
             )
             return
 
-        formatted = _format_music_result(result)
+        formatted = format_music_result(result)
 
         if not formatted:
             await loading_msg.edit_text(
@@ -257,7 +312,6 @@ async def handle_voice_message(message: Message, state: FSMContext):
             )
             return
 
-        # Natijani yuborish
         await loading_msg.edit_text(formatted, parse_mode="HTML")
 
     except Exception as e:
@@ -270,7 +324,6 @@ async def handle_voice_message(message: Message, state: FSMContext):
         except Exception:
             pass
     finally:
-        # Tozalash
         try:
             if os.path.exists(voice_path):
                 os.remove(voice_path)

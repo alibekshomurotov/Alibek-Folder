@@ -1,16 +1,17 @@
+"""Start Handler - /start command and main menu"""
+
 import logging
-from typing import Optional
 
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, ReplyKeyboardRemove
-from aiogram.filters import CommandStart, Command
+from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 
 from app.config import config
 from app.database.connection import get_session_factory
 from app.database.repositories.user_repo import UserRepository
-from app.keyboards.inline import main_menu_kb, back_to_main_kb
-from app.utils.formatter import format_welcome, format_help
+from app.keyboards.inline import main_menu_kb
+from app.utils.formatter import format_welcome
 from app.services.subscription_service import SubscriptionService
 
 logger = logging.getLogger(__name__)
@@ -20,7 +21,7 @@ router = Router()
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
-    """Handle /start command — bot haqida ma'lumot + inline menyu"""
+    """Handle /start command — welcome xabar + Profil tugmasi"""
     await state.clear()
 
     # Parse referral code from deep link
@@ -68,28 +69,19 @@ async def cmd_start(message: Message, state: FSMContext):
         await message.answer(text, reply_markup=kb, parse_mode="HTML")
         return
 
-    # Show welcome — bot haqida ma'lumot + inline tugmalar
+    # Welcome xabar + Profil tugmasi (hamma uchun bir xil)
     text = format_welcome()
     inline_kb = main_menu_kb()
 
-    # Admin ga: inline tugmalar xabar tagida + pastda admin panel reply tugmasi
     if config.bot.is_admin(message.from_user.id):
+        # Admin uchun: reply keyboard (pastdagi admin tugma) o'rnatish,
+        # lekin hech qanday qo'shimcha xabar ko'rsatmaslik
         from app.keyboards.reply import admin_reply_kb
-        # Reply keyboard ni inline bilan birga bitta xabarda yuboramiz
         await message.answer(text, reply_markup=inline_kb, parse_mode="HTML")
-        # Admin reply keyboard alohida (pastdagi tugma), lekin hech qanday qo'shimcha matn yo'q
-        await message.answer("🔧 Admin panel", reply_markup=admin_reply_kb())
+        temp_msg = await message.answer("​", reply_markup=admin_reply_kb())
+        await temp_msg.delete()
     else:
-        # Oddiy foydalanuvchi: inline tugmalar + reply menyuni olib tashlash
         await message.answer(text, reply_markup=ReplyKeyboardRemove(), parse_mode="HTML")
-
-
-@router.message(Command("help"))
-async def cmd_help(message: Message):
-    """Handle /help command"""
-    text = format_help()
-    kb = back_to_main_kb()
-    await message.answer(text, reply_markup=kb, parse_mode="HTML")
 
 
 @router.callback_query(F.data == "back_main")
@@ -99,14 +91,6 @@ async def back_to_main(callback: CallbackQuery, state: FSMContext):
     text = format_welcome()
     kb = main_menu_kb()
 
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-
-
-@router.callback_query(F.data == "help")
-async def callback_help(callback: CallbackQuery):
-    """Help callback"""
-    text = format_help()
-    kb = back_to_main_kb()
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
 
 

@@ -7,11 +7,9 @@ from app.config import CHANNEL_TYPES
 
 
 def main_menu_kb() -> InlineKeyboardMarkup:
-    """Main menu inline keyboard — faqat Profil va Yordam"""
+    """Main menu inline keyboard — faqat Profil"""
     builder = InlineKeyboardBuilder()
     builder.button(text="👤 Profil", callback_data="profile")
-    builder.button(text="ℹ️ Yordam", callback_data="help")
-    builder.adjust(2)
     return builder.as_markup()
 
 
@@ -19,7 +17,6 @@ def subscription_check_kb(channels: list) -> InlineKeyboardMarkup:
     """Subscription check keyboard"""
     builder = InlineKeyboardBuilder()
 
-    # Add channel links (only for Telegram channels)
     for ch in channels:
         if ch.channel_type == "telegram" and ch.channel_link:
             if ch.channel_link.startswith("@"):
@@ -89,7 +86,7 @@ def cancel_kb() -> InlineKeyboardMarkup:
 # ============ Admin Keyboards ============
 
 def admin_menu_kb() -> InlineKeyboardMarkup:
-    """Admin panel main menu keyboard — premium va promo olib tashlandi"""
+    """Admin panel main menu keyboard"""
     builder = InlineKeyboardBuilder()
     builder.button(text="📊 Statistika", callback_data="admin_stats")
     builder.button(text="👥 Foydalanuvchilar", callback_data="admin_users")
