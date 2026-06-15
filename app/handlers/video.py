@@ -1,9 +1,3 @@
-"""Video Handler - Tez va sodda video yuklash
-
-Foydalanuvchi link yuboradi → bot avtomatik yuklaydi →
-video tagida MP3 tugmasi ko'rsatiladi.
-"""
-
 import asyncio
 import json
 import logging
@@ -38,11 +32,11 @@ _url_cache: Dict[str, dict] = {}
 _CACHE_TTL = 1800  # 30 daqiqa
 
 # Yuklangan video fayl keshi — MP3 olish uchun
-_video_file_cache: Dict[str, dict] = {}
+_video_file_cache: Dict[str, dict] = {}  # {key: {"file_path": str, "info": dict, "cached_at": float}}
 _VIDEO_FILE_CACHE_TTL = 300  # 5 daqiqa
 
 # Oldindan tayyorlangan MP3 fayl keshi
-_mp3_ready_cache: Dict[str, str] = {}
+_mp3_ready_cache: Dict[str, str] = {}  # {key: mp3_file_path}
 
 # Bot username
 _BOT_LINK = "@UzVideoSaveBot"
@@ -56,6 +50,7 @@ def _ensure_mp4(file_path: str, force_reencode: bool = False) -> str:
     ext = os.path.splitext(file_path)[1].lower()
 
     if ext == ".mp4" and not force_reencode:
+        # MP4 fayl allaqachon mos — tezkor kodek tekshirish
         if config.download.ffmpeg_available:
             try:
                 probe = subprocess.run(
@@ -68,11 +63,12 @@ def _ensure_mp4(file_path: str, force_reencode: bool = False) -> str:
                     streams = json.loads(probe.stdout).get("streams", [])
                     vcodec = next((s.get("codec_name", "") for s in streams if s.get("codec_type") == "video"), "")
                     acodec = next((s.get("codec_name", "") for s in streams if s.get("codec_type") == "audio"), "")
+                    # H.264 + AAC = Telegram uchun tayyor, qayta kodlash shart emas
                     if vcodec == "h264" and acodec in ("aac", "mp4a"):
                         logger.info("[Video] H.264+AAC — qayta kodlash shart emas")
                         return file_path
             except Exception:
-                pass
+                pass  # ffprobe ishlamasa, faylni qaytarib yuboramiz
         return file_path
 
     if not config.download.ffmpeg_available:
@@ -145,10 +141,12 @@ def _make_mp3_kb(url: str) -> InlineKeyboardMarkup:
     key = str(hash(url) % 100000000)
     _url_cache[key] = {"url": url, "cached_at": time.time()}
 
+    # Eski cache tozalash
     now = time.time()
     expired = [k for k, v in _url_cache.items() if now - v.get("cached_at", 0) > _CACHE_TTL]
     for k in expired:
         del _url_cache[k]
+    # Video fayl kesh tozalash
     vf_expired = [k for k, v in _video_file_cache.items() if now - v.get("cached_at", 0) > _VIDEO_FILE_CACHE_TTL]
     for k in vf_expired:
         old_path = _video_file_cache[k].get("file_path", "")
@@ -158,6 +156,7 @@ def _make_mp3_kb(url: str) -> InlineKeyboardMarkup:
             except OSError:
                 pass
         del _video_file_cache[k]
+    # MP3 tayyor kesh tozalash
     mp3_expired_keys = [k for k, v in _url_cache.items() if now - v.get("cached_at", 0) > _CACHE_TTL]
     for k in list(_mp3_ready_cache.keys()):
         if k not in _url_cache:
@@ -269,9 +268,11 @@ async def handle_video_link(message: Message, state: FSMContext):
 
     platform = detect_platform(url)
 
+    # ⏳ Loading
     loading_msg = await message.answer("⏳")
 
     try:
+        # TO'G'RIDAN-TO'G'RI YUKLASH — info olmay, faqat yuklaydi
         result = await download_video(url, "720", audio_only=False)
 
         if result is None:
@@ -324,10 +325,12 @@ async def handle_video_link(message: Message, state: FSMContext):
     file_path, info = result
     file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
 
+    # Instagram uchun qayta kodlash
     extractor = info.get("extractor", "") if info else ""
     force_reencode = extractor == "instagram" or "/stories/" in str(info.get("webpage_url", "") if info else "")
     file_path = _ensure_mp4(file_path, force_reencode=force_reencode)
 
+    # Video faylni MP3 olish uchun keshlash (5 daqiqa)
     mp3_key = str(hash(url) % 100000000)
     cache_dir = os.path.join(tempfile.gettempdir(), "mp3_cache")
     os.makedirs(cache_dir, exist_ok=True)
@@ -344,14 +347,19 @@ async def handle_video_link(message: Message, state: FSMContext):
     except Exception as e:
         logger.warning(f"[MP3] Fayl keshlash xatosi: {e}")
 
+    # Caption — faqat bot linki
     caption = f"🤖 {_BOT_LINK}"
+
+    # MP3 tugmasi
     mp3_kb = _make_mp3_kb(url)
 
+    # Sticker o'chirish
     try:
         await loading_msg.delete()
     except Exception:
         pass
 
+    # Video yuborish
     try:
         if file_size_mb > config.download.max_file_size_mb:
             await message.answer_document(
@@ -379,9 +387,11 @@ async def handle_video_link(message: Message, state: FSMContext):
     finally:
         cleanup_file(file_path)
 
+    # Fon rejimida MP3 tayyorlash — foydalanuvchi tugmasini bosganda tayyor bo'ladi
     if cached_file and os.path.exists(cached_file):
         asyncio.create_task(_pre_extract_mp3(mp3_key, cached_file, info or {}))
 
+    # Bazaga yozish
     try:
         session_factory = await get_session_factory()
         async with session_factory() as session:
@@ -401,7 +411,7 @@ async def handle_video_link(message: Message, state: FSMContext):
 
 @router.callback_query(F.data.startswith("mp3_"))
 async def handle_mp3_request(callback: CallbackQuery, state: FSMContext):
-    """MP3 tugmasi → audio yuklash"""
+    """MP3 tugmasi → audio yuklash (oldindan tayyorlangan yoki keshlangan fayldan)"""
     key = callback.data.replace("mp3_", "")
     cache_data = _url_cache.get(key)
 
@@ -414,11 +424,13 @@ async def handle_mp3_request(callback: CallbackQuery, state: FSMContext):
         await callback.answer("⏰ Qayta link yuboring.", show_alert=True)
         return
 
+    # Callback javobini ZUDLIK BILAN berish — Telegram 30s dan keyin o'chiradi
     await callback.answer("⏬ Audio yuklanmoqda...")
 
     url = cache_data["url"]
     file_path_to_cleanup = None
 
+    # 1-USUL: Oldindan tayyorlangan MP3 fayl (eng tez — 0 soniya kutish)
     pre_mp3 = _mp3_ready_cache.get(key)
     if pre_mp3 and os.path.exists(pre_mp3):
         logger.info(f"[MP3] Oldindan tayyorlangan fayl topildi: {pre_mp3}")
@@ -442,6 +454,7 @@ async def handle_mp3_request(callback: CallbackQuery, state: FSMContext):
         logger.info("[MP3] Oldindan tayyorlangan fayl muvaffaqiyatli yuborildi!")
         return
 
+    # 2-USUL: Keshlangan video fayldan ffmpeg bilan audio ajratish (1-3 soniya)
     cached_video = _video_file_cache.get(key)
     if cached_video and os.path.exists(cached_video.get("file_path", "")):
         video_path = cached_video["file_path"]
@@ -453,6 +466,7 @@ async def handle_mp3_request(callback: CallbackQuery, state: FSMContext):
                 mp3_dir = tempfile.mkdtemp()
                 mp3_path = os.path.join(mp3_dir, f"{key}.mp3")
 
+                # asyncio.to_thread — event loop ni bloklamaydi
                 success = await asyncio.to_thread(_extract_mp3_sync, video_path, mp3_path)
 
                 if success:
@@ -480,6 +494,7 @@ async def handle_mp3_request(callback: CallbackQuery, state: FSMContext):
             except Exception as e:
                 logger.warning(f"[MP3] ffmpeg xatosi: {e}")
 
+    # 3-USUL: Qayta yuklash (sekin, lekin ishonchli)
     loading_msg = await callback.message.answer("⏳")
     try:
         result = await download_video(url, "720", audio_only=True)
@@ -548,8 +563,12 @@ async def cancel_download(callback: CallbackQuery, state: FSMContext):
 # ============ Musiqa qidirish (matn orqali) ============
 
 async def _handle_music_search(message: Message, query: str):
-    """Matn orqali musiqa qidirish — Shazam Search API"""
-    from app.handlers.music_recognize import search_song, format_search_results
+    """Matn orqali musiqa qidirish — Shazam Search API + audio yuklab yuborish"""
+    from app.handlers.music_recognize import (
+        search_song, format_search_results,
+        _extract_track_info, _cache_music, _make_download_kb,
+        _download_and_send_audio,
+    )
 
     # Obuna tekshirish
     if not config.bot.is_admin(message.from_user.id):
@@ -574,8 +593,38 @@ async def _handle_music_search(message: Message, query: str):
         except Exception:
             pass
 
+        if not tracks:
+            result_text = format_search_results(query, tracks)
+            await message.answer(result_text, parse_mode="HTML")
+            return
+
+        # Birinchi natijani avtomatik yuklab yuborish
+        first_hit = tracks[0]
+        track_data = first_hit.get("track", first_hit)
+        track_info = _extract_track_info({"track": track_data})
+        yt_url = track_info.get("youtube_url", "")
+
+        # Natijalarni ko'rsatish
         result_text = format_search_results(query, tracks)
-        await message.answer(result_text, parse_mode="HTML")
+
+        # Download tugmasi
+        kb = None
+        if yt_url:
+            cache_key = str(hash(yt_url) % 100000000)
+            _cache_music(cache_key, track_info, yt_url)
+            kb = _make_download_kb(cache_key)
+
+        await message.answer(result_text, parse_mode="HTML", reply_markup=kb)
+
+        # Audio faylni zudlik bilan yuklab yuborish
+        if yt_url:
+            success = await _download_and_send_audio(message, yt_url, track_info)
+            if not success:
+                await message.answer(
+                    "⚠️ <b>Birinchi qo'shiqni yuklab bo'lmadi.</b>\n\n"
+                    "💡 Yuqoridagi tugma orqali qayta urinib ko'ring.",
+                    parse_mode="HTML",
+                )
 
     except Exception as e:
         logger.error(f"[Music] Search xatosi: {e}")
