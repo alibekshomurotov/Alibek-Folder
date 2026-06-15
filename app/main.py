@@ -1,5 +1,3 @@
-"""Video Downloader Pro - Main Entry Point"""
-
 import asyncio
 import logging
 import os
@@ -156,9 +154,9 @@ async def main():
     from app.handlers.callback_cancel import router as cancel_router
 
     dp.include_router(start_router)
-    dp.include_router(video_router)
-    dp.include_router(profile_router)
     dp.include_router(admin_router)
+    dp.include_router(profile_router)
+    dp.include_router(video_router)
     dp.include_router(cancel_router)
 
     logger.info("Starting Video Downloader Pro bot...")

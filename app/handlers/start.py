@@ -65,19 +65,24 @@ async def cmd_start(message: Message, state: FSMContext):
         from app.utils.formatter import format_subscription_required
         text = format_subscription_required(unsubscribed)
         kb = subscription_check_kb(unsubscribed)
-        await message.answer(text, reply_markup=ReplyKeyboardRemove(), parse_mode="HTML")
+        await message.answer(text, reply_markup=kb, parse_mode="HTML")
         return
 
-    # Show welcome — bot haqida ma'lumot + inline tugmalar
+    # Show welcome — bot haqida ma'lumot
     text = format_welcome()
-    kb = main_menu_kb()
+    inline_kb = main_menu_kb()
 
-    # Admin ga pastda admin panel tugmasi, oddiy foydalanuvchiga hech narsa
+    # Admin ga: inline tugmalar + pastda admin panel reply tugmasi
     if config.bot.is_admin(message.from_user.id):
         from app.keyboards.reply import admin_reply_kb
-        await message.answer(text, reply_markup=admin_reply_kb(), parse_mode="HTML")
+        # 1) Inline tugmalar (Profil, Yordam) xabar tagida
+        await message.answer(text, reply_markup=inline_kb, parse_mode="HTML")
+        # 2) Reply keyboard (Admin panel) pastda turadi — alohida xabar bilan sozlash
+        await message.answer("🔧 Pastdagi tugma orqali admin panelga kiring:", reply_markup=admin_reply_kb())
     else:
-        await message.answer(text, reply_markup=ReplyKeyboardRemove(), parse_mode="HTML")
+        # Oddiy foydalanuvchi: inline tugmalar + reply menyuni olib tashlash
+        await message.answer(text, reply_markup=inline_kb, parse_mode="HTML")
+        await message.answer("📱 Link yuboring va video yuklang!", reply_markup=ReplyKeyboardRemove())
 
 
 @router.message(Command("help"))
