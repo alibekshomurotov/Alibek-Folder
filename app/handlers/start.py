@@ -1,4 +1,4 @@
-"""Start Handler - /start command and main menu"""
+
 
 import logging
 
@@ -69,7 +69,7 @@ async def cmd_start(message: Message, state: FSMContext):
         await message.answer(text, reply_markup=kb, parse_mode="HTML")
         return
 
-    # Welcome xabar + Profil tugmasi (hamma uchun bir xil)
+
     text = format_welcome()
     inline_kb = main_menu_kb()
     await message.answer(text, reply_markup=inline_kb, parse_mode="HTML")
