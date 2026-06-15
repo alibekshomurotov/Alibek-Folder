@@ -75,10 +75,10 @@ async def cmd_start(message: Message, state: FSMContext):
     # Admin ga: inline tugmalar xabar tagida + pastda admin panel reply tugmasi
     if config.bot.is_admin(message.from_user.id):
         from app.keyboards.reply import admin_reply_kb
-        # Reply keyboard pastda sozlaymiz — inline keyboard bilan birga
+        # Reply keyboard ni inline bilan birga bitta xabarda yuboramiz
         await message.answer(text, reply_markup=inline_kb, parse_mode="HTML")
-        # Reply keyboard ni alohida sozlash (pastdagi tugma)
-        await message.answer("⬇️", reply_markup=admin_reply_kb())
+        # Admin reply keyboard alohida (pastdagi tugma), lekin hech qanday qo'shimcha matn yo'q
+        await message.answer("🔧 Admin panel", reply_markup=admin_reply_kb())
     else:
         # Oddiy foydalanuvchi: inline tugmalar + reply menyuni olib tashlash
         await message.answer(text, reply_markup=ReplyKeyboardRemove(), parse_mode="HTML")

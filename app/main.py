@@ -149,6 +149,7 @@ async def main():
     from app.handlers.start import router as start_router
     from app.handlers.video import router as video_router
     from app.handlers.profile import router as profile_router
+    from app.handlers.music_recognize import router as music_router
     # Premium handler olib tashlandi — barcha foydalanuvchilar bir xil
     from app.handlers.admin import router as admin_router
     from app.handlers.callback_cancel import router as cancel_router
@@ -156,6 +157,7 @@ async def main():
     dp.include_router(start_router)
     dp.include_router(admin_router)
     dp.include_router(profile_router)
+    dp.include_router(music_router)
     dp.include_router(video_router)
     dp.include_router(cancel_router)
 

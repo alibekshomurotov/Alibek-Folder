@@ -6,3 +6,4 @@ asyncpg==0.30.0
 python-dotenv>=1.0.1
 pysocks>=1.7.1
 aiohttp-socks>=0.8.4
+shazamio>=0.8.0

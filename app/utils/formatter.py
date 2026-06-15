@@ -210,7 +210,11 @@ def format_help() -> str:
         f"  🧵 Threads\n\n"
         f"{separator()}\n\n"
         f"🎵 {bold('MP3 yuklash:')}\n"
-        f"Video tagidagi MP3 tugmasini bosib audio yuklab olishingiz mumkin."
+        f"Video tagidagi MP3 tugmasini bosib audio yuklab olishingiz mumkin.\n\n"
+        f"{separator()}\n\n"
+        f"🎶 {bold('Musiqa tanish (Shazam):')}\n"
+        f"5-10 soniyalik musiqa yuboring — bot qo'shiqni topib beradi!\n"
+        f"Audio yoki ovozli xabar yuborish kifoya."
     )
 
 
