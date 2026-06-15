@@ -1,3 +1,5 @@
+"""Start Handler - /start command and main menu"""
+
 import logging
 
 from aiogram import Router, F
@@ -70,23 +72,7 @@ async def cmd_start(message: Message, state: FSMContext):
     # Welcome xabar + Profil tugmasi (hamma uchun bir xil)
     text = format_welcome()
     inline_kb = main_menu_kb()
-
-    if config.bot.is_admin(message.from_user.id):
-        # Admin uchun: welcome xabar + Profil tugmasi (inline) + Admin panel tugmasi (reply)
-        from app.keyboards.reply import admin_reply_kb
-        await message.answer(
-            text,
-            reply_markup=inline_kb,
-            parse_mode="HTML",
-        )
-        # Admin reply keyboard ni o'rnatish (botton bar)
-        await message.answer(
-            "🔧 <b>Admin panel</b>",
-            reply_markup=admin_reply_kb(),
-            parse_mode="HTML",
-        )
-    else:
-        await message.answer(text, reply_markup=inline_kb, parse_mode="HTML")
+    await message.answer(text, reply_markup=inline_kb, parse_mode="HTML")
 
 
 @router.callback_query(F.data == "back_main")

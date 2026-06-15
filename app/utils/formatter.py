@@ -54,8 +54,6 @@ def format_welcome() -> str:
         f"  📘 Facebook  •  🐦 X  •  📌 Pinterest\n"
         f"  👻 Snapchat  •  🧵 Threads\n\n"
         f"🎵 {bold('MP3 yuklash:')} Video tagidagi MP3 tugmasini bosing.\n\n"
-        f"🎶 {bold('Musiqa tanish:')} 5-10 soniyalik audio yuboring yoki\n"
-        f"qo'shiq nomini yozing — bot topib beradi!\n\n"
         f"{separator()}\n\n"
         f"⚡ Tez yuklash  •  🎬 HD sifat  •  🔒 Xavfsiz"
     )
@@ -204,9 +202,7 @@ def format_help() -> str:
         f"🎵 {bold('MP3 yuklash:')}\n"
         f"Video tagidagi MP3 tugmasini bosib audio yuklab olishingiz mumkin.\n\n"
         f"{separator()}\n\n"
-        f"🎶 {bold('Musiqa tanish (Shazam):')}\n"
-        f"5-10 soniyalik musiqa yuboring — bot qo'shiqni topib beradi!\n"
-        f"Audio yoki ovozli xabar yuborish kifoya."
+
     )
 
 

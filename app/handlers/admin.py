@@ -57,8 +57,10 @@ async def _open_admin_panel(message: Message, state: FSMContext):
         f"🔧 {bold('Admin Panel')}\n\n"
         f"Bo'limni tanlang:"
     )
+    from app.keyboards.reply import admin_reply_kb
     await message.answer(text, reply_markup=admin_menu_kb(), parse_mode="HTML")
-
+    # Admin reply keyboard (pastki bar) o'rnatish
+    await message.answer("⬇️", reply_markup=admin_reply_kb())
 
 @router.callback_query(F.data == "admin_back")
 async def admin_back(callback: CallbackQuery, state: FSMContext):
