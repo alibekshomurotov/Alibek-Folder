@@ -33,9 +33,13 @@ logger = logging.getLogger(__name__)
 
 router = Router()
 
-# MP3 tugmasi uchun cache
+# MP3 tugmasi uchun cache — video fayl yo'li va info saqlash
 _url_cache: Dict[str, dict] = {}
 _CACHE_TTL = 1800  # 30 daqiqa
+
+# Yuklangan video fayl keshi — MP3 olish uchun
+_video_file_cache: Dict[str, dict] = {}  # {key: {"file_path": str, "info": dict, "cached_at": float}}
+_VIDEO_FILE_CACHE_TTL = 300  # 5 daqiqa
 
 # Bot username
 _BOT_LINK = "@UzVideoSaveBot"
@@ -145,6 +149,16 @@ def _make_mp3_kb(url: str) -> InlineKeyboardMarkup:
     expired = [k for k, v in _url_cache.items() if now - v.get("cached_at", 0) > _CACHE_TTL]
     for k in expired:
         del _url_cache[k]
+    # Video fayl kesh tozalash
+    vf_expired = [k for k, v in _video_file_cache.items() if now - v.get("cached_at", 0) > _VIDEO_FILE_CACHE_TTL]
+    for k in vf_expired:
+        old_path = _video_file_cache[k].get("file_path", "")
+        if old_path and os.path.exists(old_path):
+            try:
+                os.remove(old_path)
+            except OSError:
+                pass
+        del _video_file_cache[k]
 
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎵 MP3", callback_data=f"mp3_{key}")]
@@ -268,6 +282,24 @@ async def handle_video_link(message: Message, state: FSMContext):
     force_reencode = extractor == "instagram" or "/stories/" in str(info.get("webpage_url", "") if info else "")
     file_path = _ensure_mp4(file_path, force_reencode=force_reencode)
 
+    # Video faylni MP3 olish uchun keshlash (5 daqiqa)
+    mp3_key = str(hash(url) % 100000000)
+    # Faylni nusxalash (chunki asl fayl cleanup_file da o'chiriladi)
+    cache_dir = os.path.join(tempfile.gettempdir(), "mp3_cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    cached_file = os.path.join(cache_dir, f"{mp3_key}.mp4")
+    try:
+        import shutil
+        shutil.copy2(file_path, cached_file)
+        _video_file_cache[mp3_key] = {
+            "file_path": cached_file,
+            "info": info or {},
+            "cached_at": time.time(),
+        }
+        logger.info(f"[MP3] Video fayl keshlandi: {cached_file} ({file_size_mb:.1f}MB)")
+    except Exception as e:
+        logger.warning(f"[MP3] Fayl keshlash xatosi: {e}")
+
     # Caption — faqat bot linki
     caption = f"🤖 {_BOT_LINK}"
 
@@ -328,7 +360,7 @@ async def handle_video_link(message: Message, state: FSMContext):
 
 @router.callback_query(F.data.startswith("mp3_"))
 async def handle_mp3_request(callback: CallbackQuery, state: FSMContext):
-    """MP3 tugmasi → audio yuklash"""
+    """MP3 tugmasi → audio yuklash (keshlangan fayldan yoki qayta yuklab)"""
     key = callback.data.replace("mp3_", "")
     cache_data = _url_cache.get(key)
 
@@ -345,10 +377,59 @@ async def handle_mp3_request(callback: CallbackQuery, state: FSMContext):
     await callback.answer("⏬ Audio yuklanmoqda...")
 
     url = cache_data["url"]
-
-    loading_msg = await callback.message.answer("⏳")
     file_path_to_cleanup = None
 
+    # 1-USUL: Keshlangan video fayldan ffmpeg bilan audio ajratish (1-3 soniya)
+    cached_video = _video_file_cache.get(key)
+    if cached_video and os.path.exists(cached_video.get("file_path", "")):
+        video_path = cached_video["file_path"]
+        info = cached_video.get("info", {})
+        logger.info(f"[MP3] Keshlangan fayldan audio ajratilmoqda: {video_path}")
+
+        if config.download.ffmpeg_available:
+            try:
+                mp3_dir = tempfile.mkdtemp()
+                mp3_path = os.path.join(mp3_dir, f"{key}.mp3")
+
+                result = subprocess.run(
+                    ["ffmpeg", "-i", video_path,
+                     "-vn",  # Video yo'q
+                     "-acodec", "libmp3lame",
+                     "-ab", "192k",
+                     "-ar", "44100",
+                     "-y", mp3_path],
+                    capture_output=True, timeout=30
+                )
+
+                if result.returncode == 0 and os.path.exists(mp3_path) and os.path.getsize(mp3_path) > 0:
+                    file_path_to_cleanup = mp3_path
+                    title = info.get("title", "Audio") if info else "Audio"
+                    safe_title = "".join(c for c in title if c.isalnum() or c in " -_").strip()[:50]
+                    caption = f"🤖 {_BOT_LINK}"
+
+                    try:
+                        await callback.message.answer_audio(
+                            audio=FSInputFile(mp3_path),
+                            caption=caption,
+                            title=safe_title,
+                        )
+                    except Exception:
+                        await callback.message.answer_document(
+                            document=FSInputFile(mp3_path),
+                            caption=caption,
+                        )
+
+                    logger.info("[MP3] Keshlangan fayldan muvaffaqiyatli ajratildi!")
+                    return  # Tayyor!
+                else:
+                    logger.warning(f"[MP3] ffmpeg audio ajratish xatosi: {result.stderr.decode()[:200] if result.stderr else 'n/a'}")
+            except subprocess.TimeoutExpired:
+                logger.warning("[MP3] ffmpeg timeout")
+            except Exception as e:
+                logger.warning(f"[MP3] ffmpeg xatosi: {e}")
+
+    # 2-USUL: Qayta yuklash (sekin, lekin ishonchli)
+    loading_msg = await callback.message.answer("⏳")
     try:
         result = await download_video(url, "720", audio_only=True)
 
@@ -399,7 +480,6 @@ async def handle_mp3_request(callback: CallbackQuery, state: FSMContext):
     finally:
         if file_path_to_cleanup:
             cleanup_file(file_path_to_cleanup)
-    # callback.answer() allaqachon yuqorida chaqirildi — bu yerda qayta chaqirish shart emas
 
 
 @router.callback_query(F.data == "cancel_download")

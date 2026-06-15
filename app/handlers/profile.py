@@ -29,7 +29,7 @@ async def callback_profile(callback: CallbackQuery):
         )
 
         text = format_profile(user)
-        kb = profile_kb(is_premium=user.is_premium_active)
+        kb = profile_kb()
 
         await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
 
@@ -54,10 +54,7 @@ async def callback_referral_link(callback: CallbackQuery):
             f"Quyidagi link orqali do'stlaringizni taklif qiling:\n\n"
             f"{code(user.referral_link)}\n\n"
             f"{separator()}\n\n"
-            f"👥 Taklif qilingan: {bold(str(user.referrals_count))} kishi\n\n"
-            f"🎁 {bold('Mukofotlar:')}\n"
-            f"  5 ta do'st = 3 kun premium\n"
-            f"  20 ta do'st = 30 kun premium"
+            f"👥 Taklif qilingan: {bold(str(user.referrals_count))} kishi"
         )
 
         kb = back_to_main_kb()

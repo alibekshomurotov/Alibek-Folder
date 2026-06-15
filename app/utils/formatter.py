@@ -237,9 +237,8 @@ def format_help() -> str:
         f"{separator()}\n\n"
         f"🎥 {bold('Sifat tanlash:')}\n"
         f"Video topilgandan so'ng siz sifatni tanlashingiz mumkin.\n\n"
-        f"⭐ {bold('Premium:')}\n"
-        f"Do'stlaringizni taklif qilib bepul premium oling!\n"
-        f"5 ta do'st = 3 kun, 20 ta do'st = 30 kun premium."
+        f"🎵 {bold('MP3 yuklash:')}\n"
+        f"Video tagidagi MP3 tugmasini bosib audio yuklab olishingiz mumkin."
     )
 
 
