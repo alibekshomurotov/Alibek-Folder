@@ -43,11 +43,26 @@ _BOT_LINK = "@UzVideoSaveBot"
 
 # Loading animatsiya kadrlari
 _LOADING_STEPS = [
-    "⏳ Yuklanmoqda...",
-    "⏳ Yuklanmoqda.",
-    "⏳ Yuklanmoqda..",
-    "⏳ Yuklanmoqda...",
-]
+    "⏳",
+    "⏳.",
+    "⏳..",
+    "⏳...",
+]async def _animate_loading(message: Message, stop_event: asyncio.Event):
+    """Loading animatsiyasi — ⏳ qum soat harakatlanadi (qotib qolmaydi)."""
+    step = 0
+    while not stop_event.is_set():
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=0.8)
+        except asyncio.TimeoutError:
+            pass
+        if stop_event.is_set():
+            break
+        try:
+            step = (step + 1) % len(_LOADING_STEPS)
+            await message.edit_text(_LOADING_STEPS[step])
+        except Exception:
+            break    # ⏳ Qum soat — animatsiya bilan
+    loading_msg = await message.answer("⏳")
 
 
 def _ensure_mp4(file_path: str, force_reencode: bool = False) -> str:
