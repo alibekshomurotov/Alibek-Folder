@@ -261,12 +261,14 @@ def _build_base_opts(use_cookies: bool = True) -> Dict[str, Any]:
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
-        "socket_timeout": 10,
+        "socket_timeout": 8,
         "retries": 1,
         "fragment_retries": 1,
         "file_access_retries": 1,
         "throttledratelimit": 0,
-        "concurrent_fragment_downloads": 4,
+        "concurrent_fragment_downloads": 8,
+        "buffersize": 16384,
+        "http_chunk_size": 10485760,
     }
 
     if use_cookies:

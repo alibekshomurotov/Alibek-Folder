@@ -1,9 +1,3 @@
-"""Video Handler - Tez va sodda video yuklash
-
-Foydalanuvchi link yuboradi → bot avtomatik yuklaydi →
-video tagida MP3 tugmasi ko'rsatiladi.
-"""
-
 import asyncio
 import json
 import logging
@@ -47,34 +41,41 @@ _mp3_ready_cache: Dict[str, str] = {}  # {key: mp3_file_path}
 # Bot username
 _BOT_LINK = "@UzVideoSaveBot"
 
+# Loading animatsiya kadrlari
+_LOADING_STEPS = [
+    "⏳ Yuklanmoqda...",
+    "⏳ Yuklanmoqda.",
+    "⏳ Yuklanmoqda..",
+    "⏳ Yuklanmoqda...",
+]
+
 
 def _ensure_mp4(file_path: str, force_reencode: bool = False) -> str:
-    """Faylni Telegram uchun mos MP4 formatiga keltirish."""
+    """Faylni Telegram uchun mos MP4 formatiga keltirish — optimallashtirilgan."""
     if not os.path.exists(file_path):
         return file_path
 
     ext = os.path.splitext(file_path)[1].lower()
 
+    # MP4 va qayta kodlash shart bo'lmasa — tezkor kodek tekshirish
     if ext == ".mp4" and not force_reencode:
-        # MP4 fayl allaqachon mos — tezkor kodek tekshirish
         if config.download.ffmpeg_available:
             try:
                 probe = subprocess.run(
                     ["ffprobe", "-v", "quiet", "-print_format", "json",
-                     "-show_streams", file_path],
-                    capture_output=True, timeout=5
+                     "-show_streams", "-select_streams", "v:0", file_path],
+                    capture_output=True, timeout=3
                 )
                 if probe.returncode == 0:
-                    import json
                     streams = json.loads(probe.stdout).get("streams", [])
-                    vcodec = next((s.get("codec_name", "") for s in streams if s.get("codec_type") == "video"), "")
-                    acodec = next((s.get("codec_name", "") for s in streams if s.get("codec_type") == "audio"), "")
-                    # H.264 + AAC = Telegram uchun tayyor, qayta kodlash shart emas
-                    if vcodec == "h264" and acodec in ("aac", "mp4a"):
-                        logger.info("[Video] H.264+AAC — qayta kodlash shart emas")
-                        return file_path
+                    if streams:
+                        vcodec = streams[0].get("codec_name", "")
+                        # H.264 = Telegram uchun tayyor, qayta kodlash shart emas
+                        if vcodec in ("h264", "h265", "hevc", "av1"):
+                            logger.info(f"[Video] {vcodec} — qayta kodlash shart emas")
+                            return file_path
             except Exception:
-                pass  # ffprobe ishlamasa, faylni qaytarib yuboramiz
+                pass
         return file_path
 
     if not config.download.ffmpeg_available:
@@ -99,9 +100,9 @@ def _ensure_mp4(file_path: str, force_reencode: bool = False) -> str:
              "-preset", "ultrafast",
              "-crf", "28",
              "-pix_fmt", "yuv420p",
-             "-threads", "2",
+             "-threads", "4",
              "-y", new_path],
-            capture_output=True, timeout=45
+            capture_output=True, timeout=30
         )
 
         if result.returncode == 0 and os.path.exists(new_path) and os.path.getsize(new_path) > 0:
@@ -232,6 +233,20 @@ async def _pre_extract_mp3(key: str, video_path: str, info: dict):
         logger.warning(f"[MP3] Oldindan tayyorlash xatosi: {e}")
 
 
+async def _animate_loading(message: Message, stop_event: asyncio.Event):
+    """Loading animatsiyasi — har 1.5 sekundda nuqtalar harakati."""
+    step = 0
+    while not stop_event.is_set():
+        try:
+            step = (step + 1) % len(_LOADING_STEPS)
+            await message.edit_text(_LOADING_STEPS[step])
+            await asyncio.wait_for(stop_event.wait(), timeout=1.5)
+        except asyncio.TimeoutError:
+            continue
+        except Exception:
+            break
+
+
 @router.message(StateFilter(None), ~F.text.startswith("/"))
 async def handle_video_link(message: Message, state: FSMContext):
     """Link → avtomatik yuklash → video + MP3 tugmasi"""
@@ -267,12 +282,21 @@ async def handle_video_link(message: Message, state: FSMContext):
 
     platform = detect_platform(url)
 
-    # ⏳ Loading
-    loading_msg = await message.answer("⏳")
+    # ⏳ Loading animatsiya
+    loading_msg = await message.answer("⏳ Yuklanmoqda...")
+    stop_event = asyncio.Event()
+    anim_task = asyncio.create_task(_animate_loading(loading_msg, stop_event))
 
     try:
         # TO'G'RIDAN-TO'G'RI YUKLASH — info olmay, faqat yuklaydi
         result = await download_video(url, "720", audio_only=False)
+
+        # Animatsiyani to'xtatish
+        stop_event.set()
+        try:
+            await anim_task
+        except Exception:
+            pass
 
         if result is None:
             try:
@@ -298,6 +322,11 @@ async def handle_video_link(message: Message, state: FSMContext):
             return
 
     except LoginRequiredError as e:
+        stop_event.set()
+        try:
+            await anim_task
+        except Exception:
+            pass
         try:
             await loading_msg.delete()
         except Exception:
@@ -314,6 +343,11 @@ async def handle_video_link(message: Message, state: FSMContext):
 
     except Exception as e:
         logger.error(f"Download error: {e}")
+        stop_event.set()
+        try:
+            await anim_task
+        except Exception:
+            pass
         try:
             await loading_msg.delete()
         except Exception:
@@ -329,22 +363,35 @@ async def handle_video_link(message: Message, state: FSMContext):
     force_reencode = extractor == "instagram" or "/stories/" in str(info.get("webpage_url", "") if info else "")
     file_path = _ensure_mp4(file_path, force_reencode=force_reencode)
 
-    # Video faylni MP3 olish uchun keshlash (5 daqiqa)
+    # Video faylni MP3 olish uchun keshlash — symlink orqali (nusxa ko'chirish o'rniga, tezroq)
     mp3_key = str(hash(url) % 100000000)
     cache_dir = os.path.join(tempfile.gettempdir(), "mp3_cache")
     os.makedirs(cache_dir, exist_ok=True)
     cached_file = os.path.join(cache_dir, f"{mp3_key}.mp4")
     try:
-        import shutil
-        shutil.copy2(file_path, cached_file)
+        # Symlink — nusxa ko'chirishdan 100x tezroq
+        if os.path.exists(cached_file):
+            os.remove(cached_file)
+        os.symlink(file_path, cached_file)
         _video_file_cache[mp3_key] = {
             "file_path": cached_file,
             "info": info or {},
             "cached_at": time.time(),
         }
-        logger.info(f"[MP3] Video fayl keshlandi: {cached_file} ({file_size_mb:.1f}MB)")
+        logger.info(f"[MP3] Video fayl symlink keshlandi: {cached_file}")
     except Exception as e:
-        logger.warning(f"[MP3] Fayl keshlash xatosi: {e}")
+        # Symlink ishlamasa — fallback nusxa ko'chirish
+        logger.warning(f"[MP3] Symlink xatosi, nusxa ko'chirilmoqda: {e}")
+        try:
+            import shutil
+            shutil.copy2(file_path, cached_file)
+            _video_file_cache[mp3_key] = {
+                "file_path": cached_file,
+                "info": info or {},
+                "cached_at": time.time(),
+            }
+        except Exception as e2:
+            logger.warning(f"[MP3] Fayl keshlash xatosi: {e2}")
 
     # Caption — faqat bot linki
     caption = f"🤖 {_BOT_LINK}"
@@ -352,7 +399,7 @@ async def handle_video_link(message: Message, state: FSMContext):
     # MP3 tugmasi
     mp3_kb = _make_mp3_kb(url)
 
-    # Sticker o'chirish
+    # Loading xabarini o'chirish
     try:
         await loading_msg.delete()
     except Exception:
@@ -390,20 +437,25 @@ async def handle_video_link(message: Message, state: FSMContext):
     if cached_file and os.path.exists(cached_file):
         asyncio.create_task(_pre_extract_mp3(mp3_key, cached_file, info or {}))
 
-    # Bazaga yozish
+    # Bazaga yozish — fon rejimida (kutish shart emas)
+    asyncio.create_task(_save_download_stat(message.from_user.id, platform or "unknown", url, file_size_mb))
+
+
+async def _save_download_stat(user_id: int, platform: str, url: str, file_size_mb: float):
+    """Bazaga yuklash statistikasini fon rejimida yozish — asosiy jarayonni kutmaydi."""
     try:
         session_factory = await get_session_factory()
         async with session_factory() as session:
             download_repo = DownloadRepository(session)
             user_repo = UserRepository(session)
             await download_repo.create(
-                user_id=message.from_user.id,
-                platform=platform or "unknown",
+                user_id=user_id,
+                platform=platform,
                 url=url,
                 quality="720p",
                 file_size=file_size_mb,
             )
-            await user_repo.update_download_count(message.from_user.id)
+            await user_repo.update_download_count(user_id)
     except Exception as e:
         logger.error(f"DB error: {e}")
 
