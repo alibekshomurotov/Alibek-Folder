@@ -1,4 +1,5 @@
 import asyncio
+import functools
 import json
 import logging
 import os
@@ -27,54 +28,28 @@ logger = logging.getLogger(__name__)
 
 router = Router()
 
-# MP3 tugmasi uchun cache — video fayl yo'li va info saqlash
+# MP3 tugmasi uchun cache
 _url_cache: Dict[str, dict] = {}
 _CACHE_TTL = 1800  # 30 daqiqa
 
-# Yuklangan video fayl keshi — MP3 olish uchun
-_video_file_cache: Dict[str, dict] = {}  # {key: {"file_path": str, "info": dict, "cached_at": float}}
+# Yuklangan video fayl keshi - MP3 olish uchun
+_video_file_cache: Dict[str, dict] = {}
 _VIDEO_FILE_CACHE_TTL = 300  # 5 daqiqa
 
 # Oldindan tayyorlangan MP3 fayl keshi
-_mp3_ready_cache: Dict[str, str] = {}  # {key: mp3_file_path}
+_mp3_ready_cache: Dict[str, str] = {}
 
 # Bot username
 _BOT_LINK = "@UzVideoSaveBot"
 
-# Loading animatsiya kadrlari
-_LOADING_STEPS = [
-    "⏳",
-    "⏳.",
-    "⏳..",
-    "⏳...",
-]
-
-async def _animate_loading(message: Message, stop_event: asyncio.Event):
-    """Loading animatsiyasi — ⏳ qum soat harakatlanadi (qotib qolmaydi)."""
-    step = 0
-    while not stop_event.is_set():
-        try:
-            await asyncio.wait_for(stop_event.wait(), timeout=0.8)
-        except asyncio.TimeoutError:
-            pass
-        if stop_event.is_set():
-            break
-        try:
-            step = (step + 1) % len(_LOADING_STEPS)
-            await message.edit_text(_LOADING_STEPS[step])
-        except Exception:
-            break    # ⏳ Qum soat — animatsiya bilan
-    loading_msg = await message.answer("⏳")
-
 
 def _ensure_mp4(file_path: str, force_reencode: bool = False) -> str:
-    """Faylni Telegram uchun mos MP4 formatiga keltirish — optimallashtirilgan."""
+    """Faylni Telegram uchun mos MP4 formatiga keltirish."""
     if not os.path.exists(file_path):
         return file_path
 
     ext = os.path.splitext(file_path)[1].lower()
 
-    # MP4 va qayta kodlash shart bo'lmasa — tezkor kodek tekshirish
     if ext == ".mp4" and not force_reencode:
         if config.download.ffmpeg_available:
             try:
@@ -87,9 +62,8 @@ def _ensure_mp4(file_path: str, force_reencode: bool = False) -> str:
                     streams = json.loads(probe.stdout).get("streams", [])
                     if streams:
                         vcodec = streams[0].get("codec_name", "")
-                        # H.264 = Telegram uchun tayyor, qayta kodlash shart emas
                         if vcodec in ("h264", "h265", "hevc", "av1"):
-                            logger.info(f"[Video] {vcodec} — qayta kodlash shart emas")
+                            logger.info(f"[Video] {vcodec} - qayta kodlash shart emas")
                             return file_path
             except Exception:
                 pass
@@ -107,7 +81,7 @@ def _ensure_mp4(file_path: str, force_reencode: bool = False) -> str:
         if file_path == new_path:
             new_path = file_path.rsplit(".", 1)[0] + "_telegram.mp4"
 
-        logger.info(f"[Video] {'Qayta kodlash' if ext == '.mp4' else f'{ext} → mp4'}")
+        logger.info(f"[Video] {'Qayta kodlash' if ext == '.mp4' else f'{ext} -> mp4'}")
 
         result = subprocess.run(
             ["ffmpeg", "-i", file_path,
@@ -165,12 +139,10 @@ def _make_mp3_kb(url: str) -> InlineKeyboardMarkup:
     key = str(hash(url) % 100000000)
     _url_cache[key] = {"url": url, "cached_at": time.time()}
 
-    # Eski cache tozalash
     now = time.time()
     expired = [k for k, v in _url_cache.items() if now - v.get("cached_at", 0) > _CACHE_TTL]
     for k in expired:
         del _url_cache[k]
-    # Video fayl kesh tozalash
     vf_expired = [k for k, v in _video_file_cache.items() if now - v.get("cached_at", 0) > _VIDEO_FILE_CACHE_TTL]
     for k in vf_expired:
         old_path = _video_file_cache[k].get("file_path", "")
@@ -180,7 +152,6 @@ def _make_mp3_kb(url: str) -> InlineKeyboardMarkup:
             except OSError:
                 pass
         del _video_file_cache[k]
-    # MP3 tayyor kesh tozalash
     mp3_expired_keys = [k for k, v in _url_cache.items() if now - v.get("cached_at", 0) > _CACHE_TTL]
     for k in list(_mp3_ready_cache.keys()):
         if k not in _url_cache:
@@ -212,7 +183,7 @@ def _format_story_error(missing_cookies: list = None) -> str:
 
 
 def _extract_mp3_sync(video_path: str, mp3_path: str) -> bool:
-    """ffmpeg bilan MP3 ajratish (sync — thread da ishlaydi)."""
+    """ffmpeg bilan MP3 ajratish (sync - thread da ishlaydi)."""
     try:
         result = subprocess.run(
             ["ffmpeg", "-i", video_path,
@@ -231,7 +202,7 @@ def _extract_mp3_sync(video_path: str, mp3_path: str) -> bool:
 
 
 async def _pre_extract_mp3(key: str, video_path: str, info: dict):
-    """Fon rejimida MP3 tayyorlash — foydalanuvchi MP3 tugmasini bosganda tayyor bo'ladi."""
+    """Fon rejimida MP3 tayyorlash."""
     if not config.download.ffmpeg_available:
         return
 
@@ -250,23 +221,22 @@ async def _pre_extract_mp3(key: str, video_path: str, info: dict):
         logger.warning(f"[MP3] Oldindan tayyorlash xatosi: {e}")
 
 
-async def _animate_loading(message: Message, stop_event: asyncio.Event):
-    """Loading animatsiyasi — har 1.5 sekundda nuqtalar harakati."""
-    step = 0
-    while not stop_event.is_set():
-        try:
-            step = (step + 1) % len(_LOADING_STEPS)
-            await message.edit_text(_LOADING_STEPS[step])
-            await asyncio.wait_for(stop_event.wait(), timeout=1.5)
-        except asyncio.TimeoutError:
-            continue
-        except Exception:
-            break
+def _run_download_in_thread(url: str, quality: str, audio_only: bool):
+    """download_video ni alohida event loop da thread pool da ishlatish.
+
+    Bu yt-dlp bloklashi event loop ga ta'sir qilmaydi -
+    ⏳ qum soat stikeri aylanaveradi!
+    """
+    new_loop = asyncio.new_event_loop()
+    try:
+        return new_loop.run_until_complete(download_video(url, quality, audio_only))
+    finally:
+        new_loop.close()
 
 
 @router.message(StateFilter(None), ~F.text.startswith("/"))
 async def handle_video_link(message: Message, state: FSMContext):
-    """Link → avtomatik yuklash → video + MP3 tugmasi"""
+    """Link -> avtomatik yuklash -> video + MP3 tugmasi"""
     url = extract_url(message.text or "")
     if not url:
         return
@@ -299,21 +269,17 @@ async def handle_video_link(message: Message, state: FSMContext):
 
     platform = detect_platform(url)
 
-    # ⏳ Loading animatsiya
-    loading_msg = await message.answer("⏳ Yuklanmoqda...")
-    stop_event = asyncio.Event()
-    anim_task = asyncio.create_task(_animate_loading(loading_msg, stop_event))
+    # ⏳ QUM SOAT STIKERI - Telegram o'zi animatsiya qiladi!
+    loading_msg = await message.answer("⏳")
 
+    # Yuklashni alohida thread da ishlatamiz - event loop OZOD BO'LADI
+    # Shunda ⏳ qum soat aylanib turadi, qotib qolmaydi!
+    loop = asyncio.get_event_loop()
     try:
-        # TO'G'RIDAN-TO'G'RI YUKLASH — info olmay, faqat yuklaydi
-        result = await download_video(url, "720", audio_only=False)
-
-        # Animatsiyani to'xtatish
-        stop_event.set()
-        try:
-            await anim_task
-        except Exception:
-            pass
+        result = await loop.run_in_executor(
+            None,
+            functools.partial(_run_download_in_thread, url, "720", False)
+        )
 
         if result is None:
             try:
@@ -326,9 +292,9 @@ async def handle_video_link(message: Message, state: FSMContext):
                     "❌ <b>YouTube yuklab bo'lmadi</b>\n\n"
                     "🔍 Sabab: YouTube server IP ni bloklamoqda (bot detektsiya).\n\n"
                     "💡 Yechim:\n"
-                    "• Keyinroq qayta urinib ko'ring\n"
-                    "• Boshqa video linkini yuboring\n"
-                    "• Agar doim shu xato chiqsa — administratorga xabar bering",
+                    "- Keyinroq qayta urinib ko'ring\n"
+                    "- Boshqa video linkini yuboring\n"
+                    "- Agar doim shu xato chiqsa - administratorga xabar bering",
                     parse_mode="HTML",
                 )
             else:
@@ -339,11 +305,6 @@ async def handle_video_link(message: Message, state: FSMContext):
             return
 
     except LoginRequiredError as e:
-        stop_event.set()
-        try:
-            await anim_task
-        except Exception:
-            pass
         try:
             await loading_msg.delete()
         except Exception:
@@ -360,11 +321,6 @@ async def handle_video_link(message: Message, state: FSMContext):
 
     except Exception as e:
         logger.error(f"Download error: {e}")
-        stop_event.set()
-        try:
-            await anim_task
-        except Exception:
-            pass
         try:
             await loading_msg.delete()
         except Exception:
@@ -380,13 +336,12 @@ async def handle_video_link(message: Message, state: FSMContext):
     force_reencode = extractor == "instagram" or "/stories/" in str(info.get("webpage_url", "") if info else "")
     file_path = _ensure_mp4(file_path, force_reencode=force_reencode)
 
-    # Video faylni MP3 olish uchun keshlash — symlink orqali (nusxa ko'chirish o'rniga, tezroq)
+    # Video faylni MP3 olish uchun keshlash - symlink orqali (tezroq)
     mp3_key = str(hash(url) % 100000000)
     cache_dir = os.path.join(tempfile.gettempdir(), "mp3_cache")
     os.makedirs(cache_dir, exist_ok=True)
     cached_file = os.path.join(cache_dir, f"{mp3_key}.mp4")
     try:
-        # Symlink — nusxa ko'chirishdan 100x tezroq
         if os.path.exists(cached_file):
             os.remove(cached_file)
         os.symlink(file_path, cached_file)
@@ -397,7 +352,6 @@ async def handle_video_link(message: Message, state: FSMContext):
         }
         logger.info(f"[MP3] Video fayl symlink keshlandi: {cached_file}")
     except Exception as e:
-        # Symlink ishlamasa — fallback nusxa ko'chirish
         logger.warning(f"[MP3] Symlink xatosi, nusxa ko'chirilmoqda: {e}")
         try:
             import shutil
@@ -410,13 +364,13 @@ async def handle_video_link(message: Message, state: FSMContext):
         except Exception as e2:
             logger.warning(f"[MP3] Fayl keshlash xatosi: {e2}")
 
-    # Caption — faqat bot linki
+    # Caption
     caption = f"🤖 {_BOT_LINK}"
 
     # MP3 tugmasi
     mp3_kb = _make_mp3_kb(url)
 
-    # Loading xabarini o'chirish
+    # Qum soatni o'chirish
     try:
         await loading_msg.delete()
     except Exception:
@@ -450,16 +404,16 @@ async def handle_video_link(message: Message, state: FSMContext):
     finally:
         cleanup_file(file_path)
 
-    # Fon rejimida MP3 tayyorlash — foydalanuvchi tugmasini bosganda tayyor bo'ladi
+    # Fon rejimida MP3 tayyorlash
     if cached_file and os.path.exists(cached_file):
         asyncio.create_task(_pre_extract_mp3(mp3_key, cached_file, info or {}))
 
-    # Bazaga yozish — fon rejimida (kutish shart emas)
+    # Bazaga yozish - fon rejimida
     asyncio.create_task(_save_download_stat(message.from_user.id, platform or "unknown", url, file_size_mb))
 
 
 async def _save_download_stat(user_id: int, platform: str, url: str, file_size_mb: float):
-    """Bazaga yuklash statistikasini fon rejimida yozish — asosiy jarayonni kutmaydi."""
+    """Bazaga yuklash statistikasini fon rejimida yozish."""
     try:
         session_factory = await get_session_factory()
         async with session_factory() as session:
@@ -479,7 +433,7 @@ async def _save_download_stat(user_id: int, platform: str, url: str, file_size_m
 
 @router.callback_query(F.data.startswith("mp3_"))
 async def handle_mp3_request(callback: CallbackQuery, state: FSMContext):
-    """MP3 tugmasi → audio yuklash (oldindan tayyorlangan yoki keshlangan fayldan)"""
+    """MP3 tugmasi -> audio yuklash"""
     key = callback.data.replace("mp3_", "")
     cache_data = _url_cache.get(key)
 
@@ -492,13 +446,12 @@ async def handle_mp3_request(callback: CallbackQuery, state: FSMContext):
         await callback.answer("⏰ Qayta link yuboring.", show_alert=True)
         return
 
-    # Callback javobini ZUDLIK BILAN berish — Telegram 30s dan keyin o'chiradi
     await callback.answer("⏬ Audio yuklanmoqda...")
 
     url = cache_data["url"]
     file_path_to_cleanup = None
 
-    # 1-USUL: Oldindan tayyorlangan MP3 fayl (eng tez — 0 soniya kutish)
+    # 1-USUL: Oldindan tayyorlangan MP3 fayl
     pre_mp3 = _mp3_ready_cache.get(key)
     if pre_mp3 and os.path.exists(pre_mp3):
         logger.info(f"[MP3] Oldindan tayyorlangan fayl topildi: {pre_mp3}")
@@ -522,7 +475,7 @@ async def handle_mp3_request(callback: CallbackQuery, state: FSMContext):
         logger.info("[MP3] Oldindan tayyorlangan fayl muvaffaqiyatli yuborildi!")
         return
 
-    # 2-USUL: Keshlangan video fayldan ffmpeg bilan audio ajratish (1-3 soniya)
+    # 2-USUL: Keshlangan video fayldan ffmpeg bilan audio ajratish
     cached_video = _video_file_cache.get(key)
     if cached_video and os.path.exists(cached_video.get("file_path", "")):
         video_path = cached_video["file_path"]
@@ -534,7 +487,6 @@ async def handle_mp3_request(callback: CallbackQuery, state: FSMContext):
                 mp3_dir = tempfile.mkdtemp()
                 mp3_path = os.path.join(mp3_dir, f"{key}.mp3")
 
-                # asyncio.to_thread — event loop ni bloklamaydi
                 success = await asyncio.to_thread(_extract_mp3_sync, video_path, mp3_path)
 
                 if success:
@@ -562,10 +514,14 @@ async def handle_mp3_request(callback: CallbackQuery, state: FSMContext):
             except Exception as e:
                 logger.warning(f"[MP3] ffmpeg xatosi: {e}")
 
-    # 3-USUL: Qayta yuklash (sekin, lekin ishonchli)
+    # 3-USUL: Qayta yuklash
     loading_msg = await callback.message.answer("⏳")
     try:
-        result = await download_video(url, "720", audio_only=True)
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            functools.partial(_run_download_in_thread, url, "720", True)
+        )
 
         try:
             await loading_msg.delete()
