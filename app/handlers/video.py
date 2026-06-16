@@ -47,7 +47,9 @@ _LOADING_STEPS = [
     "⏳.",
     "⏳..",
     "⏳...",
-]async def _animate_loading(message: Message, stop_event: asyncio.Event):
+]
+
+async def _animate_loading(message: Message, stop_event: asyncio.Event):
     """Loading animatsiyasi — ⏳ qum soat harakatlanadi (qotib qolmaydi)."""
     step = 0
     while not stop_event.is_set():
