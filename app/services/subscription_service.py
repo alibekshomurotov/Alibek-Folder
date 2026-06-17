@@ -1,5 +1,4 @@
-"""Subscription Service - Business logic for channel subscriptions"""
-
+import asyncio
 import logging
 from typing import List, Tuple
 
@@ -18,7 +17,7 @@ class SubscriptionService:
 
     @staticmethod
     async def get_unsubscribed_channels(bot: Bot, user_id: int) -> List[Channel]:
-        """Get list of Telegram channels the user hasn't subscribed to"""
+        """Get list of Telegram channels the user hasn't subscribed to - PARALLEL!"""
         session_factory = await get_session_factory()
 
         async with session_factory() as session:
@@ -28,28 +27,36 @@ class SubscriptionService:
             if not telegram_channels:
                 return []
 
-            unsubscribed = []
-            for ch in telegram_channels:
+            # Barcha kanallarni PARALLEL tekshirish (1-2 soniya o'rniga)
+            async def _check_channel(ch: Channel) -> tuple:
+                """Bitta kanalni tekshirish"""
                 try:
                     channel_id = ch.channel_id or ch.channel_link
                     member = await bot.get_chat_member(channel_id, user_id)
                     status = str(member.status)
-                    if status not in (
+                    if status in (
                         str(ChatMemberStatus.MEMBER),
                         str(ChatMemberStatus.ADMINISTRATOR),
                         str(ChatMemberStatus.OWNER),
                     ):
-                        unsubscribed.append(ch)
+                        return (ch, False)  # obuna bo'lgan
+                    return (ch, True)  # obuna bo'lmagan
                 except Exception as e:
                     logger.warning(f"Could not check subscription for {ch.channel_link}: {e}")
-                    unsubscribed.append(ch)
+                    return (ch, True)  # xato - obuna bo'lmagan deb hisoblaymiz
 
+            # Parallel tekshirish - barcha kanallar bir vaqtda!
+            results = await asyncio.gather(
+                *[_check_channel(ch) for ch in telegram_channels],
+                return_exceptions=False,
+            )
+
+            unsubscribed = [ch for ch, is_unsub in results if is_unsub]
             return unsubscribed
 
     @staticmethod
     async def is_subscribed(bot: Bot, user_id: int) -> Tuple[bool, List[Channel]]:
-        """Check if user is subscribed to all required channels.
-        Returns (is_subscribed, unsubscribed_channels)"""
+        """Check if user is subscribed to all required channels."""
         unsubscribed = await SubscriptionService.get_unsubscribed_channels(bot, user_id)
         return len(unsubscribed) == 0, unsubscribed
 
@@ -85,3 +92,4 @@ class SubscriptionService:
         async with session_factory() as session:
             channel_repo = ChannelRepository(session)
             return await channel_repo.get_all_channels()
+    
