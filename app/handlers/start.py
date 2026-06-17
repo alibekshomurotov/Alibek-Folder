@@ -1,9 +1,9 @@
-import asyncio
+"""Start Handler - /start command and main menu"""
+
 import logging
-import time
 
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery, ReplyKeyboardRemove
+from aiogram.types import Message, CallbackQuery
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 
@@ -57,22 +57,8 @@ async def cmd_start(message: Message, state: FSMContext):
             referred_by=referred_by,
         )
 
-    # Welcome xabar + Profil tugmasi
-    text = format_welcome()
-    inline_kb = main_menu_kb()
-
-    if is_admin:
-        # Admin uchun: inline keyboard + reply keyboard BIRGALIKDA
-        from app.keyboards.reply import admin_reply_kb
-        await message.answer(
-            text,
-            reply_markup=admin_reply_kb(),
-            parse_mode="HTML",
-        )
-        # Inline keyboard alohida xabar sifatida
-        await message.answer("👤 Profil:", reply_markup=inline_kb)
-    else:
-        # Oddiy foydalanuvchi: obuna tekshirish
+    # Obuna tekshirish (admin ham tekshiradi, lekin bypass qilinadi)
+    if not is_admin:
         unsubscribed = await SubscriptionService.get_unsubscribed_channels(
             message.bot, message.from_user.id
         )
@@ -84,7 +70,10 @@ async def cmd_start(message: Message, state: FSMContext):
             await message.answer(sub_text, reply_markup=kb, parse_mode="HTML")
             return
 
-        await message.answer(text, reply_markup=inline_kb, parse_mode="HTML")
+    # Welcome xabar + Profil tugmasi (BIR xabar — admin ham, oddiy foydalanuvchi ham)
+    text = format_welcome()
+    inline_kb = main_menu_kb()
+    await message.answer(text, reply_markup=inline_kb, parse_mode="HTML")
 
 
 @router.callback_query(F.data == "back_main")
