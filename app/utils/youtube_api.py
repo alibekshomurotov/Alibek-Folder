@@ -1,3 +1,4 @@
+
 import asyncio
 import json
 import logging
@@ -22,6 +23,8 @@ YOUTUBE_PROXY = os.getenv("YOUTUBE_PROXY", "") or os.getenv("HTTP_PROXY", "") or
 
 # Proxy holati - agar proxy xato bersa, keyingi so'rovlarda ishlatmaymiz
 _proxy_broken = False
+_proxy_broken_since = 0  # Qachon buzilganini kuzatish
+_PROXY_RETRY_AFTER = 300  # 5 daqiqadan keyin qayta urinib ko'rish
 
 # Cobalt holati - agar HF Space ishlamasa, keyingi so'rovlarda o'tkazib yuboramiz
 _cobalt_broken_until = 0  # timestamp — shu vaqtgacha Cobalt ni o'tkazib yuborish
@@ -124,11 +127,21 @@ _cookie_cache: Dict[str, Any] = {"cookies": None, "expires": 0}
 
 
 def _is_proxy_available() -> bool:
-    """Proxy ishlayaptimi tekshirish."""
-    global _proxy_broken
+    """Proxy ishlayaptimi tekshirish.
+
+    Agar proxy buzilgan bo'lsa, lekin _PROXY_RETRY_AFTER vaqt o'tgan bo'lsa,
+    qayta urinib ko'rishga ruxsat beramiz.
+    """
+    global _proxy_broken, _proxy_broken_since
     if not YOUTUBE_PROXY:
         return False
     if _proxy_broken:
+        # 5 daqiqa o'tgan bo'lsa, qayta urinib ko'rish
+        if _proxy_broken_since and (time.time() - _proxy_broken_since > _PROXY_RETRY_AFTER):
+            logger.info("[Proxy] Qayta urinib ko'rilmoqda (5 daqiqa o'tdi)...")
+            _proxy_broken = False
+            _proxy_broken_since = 0
+            return True
         return False
     return True
 
@@ -162,12 +175,18 @@ def _get_proxy_url() -> Optional[str]:
     return None
 
 
-def _mark_proxy_broken():
-    """Proxy buzilgan deb belgilash."""
-    global _proxy_broken
+def _mark_proxy_broken(reason: str = ""):
+    """Proxy buzilgan deb belgilash.
+
+    Barcha modullar (youtube_api.py, downloader.py) bu holatni ko'radi
+    va proxy ni o'tkazib yuboradi.
+    """
+    global _proxy_broken, _proxy_broken_since
     if not _proxy_broken:
         _proxy_broken = True
-        logger.warning("[Proxy] Proxy ishlamadi, endi proxiesz ishlatamiz!")
+        _proxy_broken_since = time.time()
+        reason_str = f" ({reason})" if reason else ""
+        logger.warning(f"[Proxy] Proxy ishlamadi{reason_str}, endi proxiesz ishlatamiz! Qayta urinish: 5 daqiqadan keyin")
 
 
 def _extract_video_id(url: str) -> Optional[str]:
@@ -337,6 +356,11 @@ async def _try_cobalt(url: str, quality: str = "720", audio_only: bool = False) 
                 # HTML javob = noto'g'ri
                 if body.strip().startswith("<"):
                     logger.error("[Cobalt] HTML javob — API noto'g'ri sozlangan!")
+                    return None
+
+                # 407 = Proxy Authentication Required — proxy ni darhol buzilgan deb belgilash
+                if resp.status == 407:
+                    _mark_proxy_broken("407 Proxy Auth Required (Cobalt)")
                     return None
 
                 if resp.status == 401:
@@ -670,6 +694,12 @@ async def _innertube_player_request(video_id: str, client_key: str,
                 timeout=aiohttp.ClientTimeout(total=8),  # 8 soniya — tezroq
             ) as resp:
                 if resp.status != 200:
+                    # 407 = Proxy Authentication Required — proxy ni darhol buzilgan deb belgilash
+                    if resp.status == 407 and use_proxy:
+                        _mark_proxy_broken("407 Proxy Auth Required")
+                    # 403 ham proxy muammosi bo'lishi mumkin
+                    elif resp.status in (403, 429) and use_proxy:
+                        pass  # Proxy ni buzilgan deb belgilamaslik - bu YouTube cheklovi
                     logger.warning(f"[InnerTube] {client_key}: HTTP {resp.status}")
                     return None
 
@@ -908,6 +938,9 @@ async def _try_invidious(video_id: str, fast_only: bool = False) -> Optional[Dic
                     url = f"{instance}/api/v1/videos/{video_id}"
                     async with session.get(url, proxy=proxy, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                         if resp.status != 200:
+                            if resp.status == 407:
+                                _mark_proxy_broken("407 Proxy Auth Required (Invidious)")
+                                break
                             continue
 
                         data = await resp.json()
@@ -922,7 +955,7 @@ async def _try_invidious(video_id: str, fast_only: bool = False) -> Optional[Dic
                             }
 
             except aiohttp.ClientConnectorError:
-                _mark_proxy_broken()
+                _mark_proxy_broken("Invidious connection error")
                 break
             except Exception:
                 continue
@@ -985,6 +1018,9 @@ async def _try_piped(video_id: str, fast_only: bool = False) -> Optional[Dict[st
                     url = f"{instance}/streams/{video_id}"
                     async with session.get(url, proxy=proxy, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                         if resp.status != 200:
+                            if resp.status == 407:
+                                _mark_proxy_broken("407 Proxy Auth Required (Piped)")
+                                break
                             continue
 
                         data = await resp.json()
@@ -1001,7 +1037,7 @@ async def _try_piped(video_id: str, fast_only: bool = False) -> Optional[Dict[st
                             }
 
             except aiohttp.ClientConnectorError:
-                _mark_proxy_broken()
+                _mark_proxy_broken("Piped connection error")
                 break
             except Exception:
                 continue
@@ -1295,6 +1331,10 @@ async def _download_from_url(url: str, video_id: str, audio_only: bool,
                 async with aiohttp.ClientSession(connector=connector, headers=HEADERS) as session:
                     async with session.get(url, proxy=proxy, timeout=aiohttp.ClientTimeout(total=120)) as resp:
                         if resp.status != 200:
+                            # 407 = Proxy Auth Required — proxy ni buzilgan deb belgilash
+                            if resp.status == 407 and use_proxy:
+                                _mark_proxy_broken("407 Proxy Auth Required (download)")
+                                continue
                             if use_proxy:
                                 continue
                             logger.error(f"[API] Yuklash HTTP xatosi: {resp.status}")
@@ -1323,7 +1363,7 @@ async def _download_from_url(url: str, video_id: str, audio_only: bool,
 
             except aiohttp.ClientConnectorError:
                 if use_proxy:
-                    _mark_proxy_broken()
+                    _mark_proxy_broken("Download connection error")
                     continue
                 logger.error("[API] Ulanish xatosi")
                 return None

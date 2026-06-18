@@ -1201,7 +1201,15 @@ async def _download_non_youtube(url: str, quality: str, audio_only: bool) -> Opt
                             return file_path, info
 
             except Exception as e:
-                logger.warning(f"[{platform}] Story yt-dlp xato: {str(e)[:80]}")
+                err_str = str(e)
+                logger.warning(f"[{platform}] Story yt-dlp xato: {err_str[:80]}")
+                # 407 — proxy buzilgan
+                if "407" in err_str or "Proxy Authentication Required" in err_str:
+                    try:
+                        from app.utils.youtube_api import _mark_proxy_broken
+                        _mark_proxy_broken(f"407 from yt-dlp ({platform} story)")
+                    except ImportError:
+                        pass
 
             raise LoginRequiredError("instagram", "story", ig_validation.get("missing", []))
 
