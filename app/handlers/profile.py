@@ -1,4 +1,3 @@
-
 import logging
 
 from aiogram import Router, F
@@ -30,7 +29,16 @@ async def callback_profile(callback: CallbackQuery):
         text = format_profile(user)
         kb = back_to_main_kb()
 
-        await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        # Start xabarini o'chirib, profil xabarini yuborish
+        try:
+            await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        except Exception:
+            # edit_text ishlamasa — yangi xabar
+            try:
+                await callback.message.delete()
+            except Exception:
+                pass
+            await callback.message.answer(text, reply_markup=kb, parse_mode="HTML")
 
 
 @router.callback_query(F.data == "referral_link")
@@ -60,4 +68,11 @@ async def callback_referral_link(callback: CallbackQuery):
         )
 
         kb = back_to_main_kb()
-        await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        try:
+            await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        except Exception:
+            try:
+                await callback.message.delete()
+            except Exception:
+                pass
+            await callback.message.answer(text, reply_markup=kb, parse_mode="HTML")

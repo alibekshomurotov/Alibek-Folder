@@ -1,20 +1,32 @@
+
 import logging
 
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
-from aiogram.filters import CommandStart, Command
+from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
+
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.config import config
 from app.database.connection import get_session_factory
 from app.database.repositories.user_repo import UserRepository
-from app.keyboards.inline import main_menu_kb, back_to_main_kb
 from app.keyboards.reply import main_reply_kb
+from app.keyboards.inline import back_to_main_kb
 from app.services.subscription_service import SubscriptionService
 
 logger = logging.getLogger(__name__)
 
 router = Router()
+
+
+def _start_kb() -> InlineKeyboardMarkup:
+    """Start xabari ostidagi inline tugma"""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="👤 Profil", callback_data="profile")
+    builder.adjust(1)
+    return builder.as_markup()
 
 
 @router.message(CommandStart())
@@ -67,8 +79,7 @@ async def cmd_start(message: Message, state: FSMContext):
         await message.answer(text, reply_markup=kb, parse_mode="HTML")
         return
 
-    # Show welcome — faqat xabar + Profil tugma
-    is_admin = config.bot.is_admin(message.from_user.id)
+    # Xabar + inline Profil tugma
     text = (
         f"🎬 <b>Video Downloader Bot</b>\n\n"
         f"Ijtimoiy tarmoqdan video linkini yuboring — video yuklab beriladi.\n\n"
@@ -82,16 +93,22 @@ async def cmd_start(message: Message, state: FSMContext):
         f"  👻 Snapchat\n"
         f"  🧵 Threads"
     )
-    reply_kb = main_reply_kb(is_admin=is_admin)
+    await message.answer(text, reply_markup=_start_kb(), parse_mode="HTML")
 
-    await message.answer(text, reply_markup=reply_kb, parse_mode="HTML")
+    # Admin uchun reply keyboard
+    is_admin = config.bot.is_admin(message.from_user.id)
+    if is_admin:
+        await message.answer("🔧 Admin panel uchun quyidagi tugmani bosing:", reply_markup=main_reply_kb(is_admin=True))
 
 
 @router.callback_query(F.data == "back_main")
 async def back_to_main(callback: CallbackQuery, state: FSMContext):
-    """Return to main menu"""
+    """Return to main — xabarni o'chirish"""
     await state.clear()
-    await callback.message.delete()
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
 
 
 @router.callback_query(F.data == "check_subscription")
@@ -102,7 +119,26 @@ async def check_subscription(callback: CallbackQuery):
     )
 
     if is_subscribed or config.bot.is_admin(callback.from_user.id):
-        await callback.message.delete()
+        # Obuna bo'ldi — xabarni o'chir
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        # Start xabarini qayta yuborish
+        text = (
+            f"🎬 <b>Video Downloader Bot</b>\n\n"
+            f"Ijtimoiy tarmoqdan video linkini yuboring — video yuklab beriladi.\n\n"
+            f"📱 Qo'llab-quvvatlanadi:\n"
+            f"  🎵 TikTok\n"
+            f"  📸 Instagram\n"
+            f"  ▶️ YouTube\n"
+            f"  📘 Facebook\n"
+            f"  🐦 X (Twitter)\n"
+            f"  📌 Pinterest\n"
+            f"  👻 Snapchat\n"
+            f"  🧵 Threads"
+        )
+        await callback.message.answer(text, reply_markup=_start_kb(), parse_mode="HTML")
     else:
         from app.keyboards.inline import subscription_check_kb
         from app.utils.formatter import format_subscription_required
