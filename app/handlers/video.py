@@ -1,4 +1,9 @@
+"""Video Handler - Video yuklash va yuborish
 
+Oqim: Link → ⏳ qum soat animatsiyasi → Video yuborish → Qum soat yoqoladi
+Video ostida: 🎵 MP3 yuklash tugmasi
+Caption: @UzVideoSaveBot
+"""
 
 import asyncio
 import logging
