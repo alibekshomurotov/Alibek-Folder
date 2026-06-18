@@ -1,4 +1,3 @@
-
 import os
 import logging
 import re
@@ -287,6 +286,9 @@ def _build_base_opts(use_cookies: bool = True, platform: str = "youtube") -> Dic
     # YouTube → YOUTUBE_PROXY (datacenter IP blokirovkasi uchun)
     # Instagram → INSTAGRAM_PROXY (ixtiyoriy, alohida)
     # Boshqa → proxy ishlatilmaydi
+    #
+    # MUHIM: yt-dlp HTTP_PROXY/HTTPS_PROXY env ni avtomatik o'qiydi!
+    # Proxy ishlatmaslik uchun opts["proxy"] = "" qilish kerak (None emas!)
     try:
         from app.utils.youtube_api import get_proxy_for_platform
         proxy = get_proxy_for_platform(platform)
@@ -294,6 +296,8 @@ def _build_base_opts(use_cookies: bool = True, platform: str = "youtube") -> Dic
             opts["proxy"] = proxy
             logger.debug(f"[yt-dlp] {platform} proxy ishlatilmoqda: {proxy.split('@')[-1]}")
         else:
+            # MUHIM: proxy="" yozish kerak — aks holda yt-dlp HTTP_PROXY env dan o'qiydi!
+            opts["proxy"] = ""
             if platform == "youtube":
                 yt_proxy = os.getenv("YOUTUBE_PROXY", "") or os.getenv("HTTP_PROXY", "") or os.getenv("HTTPS_PROXY", "")
                 if yt_proxy:
@@ -304,6 +308,11 @@ def _build_base_opts(use_cookies: bool = True, platform: str = "youtube") -> Dic
             proxy = os.getenv("YOUTUBE_PROXY", "") or os.getenv("HTTP_PROXY", "") or os.getenv("HTTPS_PROXY", "")
             if proxy:
                 opts["proxy"] = proxy
+            else:
+                opts["proxy"] = ""
+        else:
+            # YouTube bo'lmagan platformalar uchun proxy ishlatmaslik
+            opts["proxy"] = ""
 
     return opts
 
@@ -358,7 +367,11 @@ def _has_video_audio(formats: list) -> bool:
 async def _download_instagram_story_api(url: str, cookies_path: str) -> Optional[Tuple[str, Dict[str, Any]]]:
     """Instagram story'ni to'g'ridan-to'g'ri API orqali yuklash.
 
-    yt-dlp ishlamaganda bu fallback sifatida ishlatiladi.
+    Strategiya (yangilangan — 429 rate limit bilan kurashish):
+    1. Web API (www.instagram.com/api/v1/) — birinchi urinish
+    2. Mobile API (i.instagram.com/api/v1/) — 429 bo'lsa fallback
+    3. Sahifa orqali user_id olish — ikkala API ham ishlamasa
+
     Instagram stories faqat autentifikatsiya qilingan foydalanuvchilarga ko'rinadi,
     shuning uchun cookie'larda sessionid, ds_user_id, csrftoken bo'lishi shart.
 
@@ -367,10 +380,9 @@ async def _download_instagram_story_api(url: str, cookies_path: str) -> Optional
     """
     import http.cookiejar
     import aiohttp
+    import asyncio
 
     # URL dan username va story ID ajratish
-    # Format: https://www.instagram.com/stories/USERNAME/STORY_ID/
-    # Yoki: https://www.instagram.com/stories/USERNAME/
     story_match = re.search(r'/stories/([^/]+)(?:/(\d+))?/?', url)
     if not story_match:
         logger.error("[IG-API] URL dan username topilmadi")
@@ -395,7 +407,8 @@ async def _download_instagram_story_api(url: str, cookies_path: str) -> Optional
     # Cookie string yaratish
     cookie_str = "; ".join(f"{k}={v}" for k, v in ig_cookies.items())
 
-    headers = {
+    # === 1-USUL: Web API (www.instagram.com) ===
+    web_headers = {
         "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
         "X-IG-App-ID": "936619743392459",
         "X-CSRFToken": csrftoken,
@@ -410,71 +423,210 @@ async def _download_instagram_story_api(url: str, cookies_path: str) -> Optional
         "Sec-Fetch-Site": "same-origin",
     }
 
-    async with aiohttp.ClientSession(headers=headers) as session:
-        # 1-qadam: Username dan user ID olish
+    # === 2-USUL: Mobile API (i.instagram.com) ===
+    # Bu API 429 kamroq beradi — Instagram ilovasi shu API dan foydalanadi
+    mobile_headers = {
+        "User-Agent": "Instagram 312.1.0.34.111 (iPhone; iOS 16_6; en_US; iPhone14,2; scale=3.00; 1080x2340; 530840967)",
+        "X-IG-App-ID": "567067343352427",
+        "X-IG-Device-ID": ig_cookies.get("ig_did", "00000000-0000-0000-0000-000000000000"),
+        "X-IG-Android-ID": "android-" + ds_user_id[-16:] if ds_user_id else "",
+        "X-CSRFToken": csrftoken,
+        "Cookie": cookie_str,
+        "Accept": "application/json",
+        "Accept-Language": "en-US,en;q=0.9",
+        "X-IG-Connection-Type": "WIFI",
+        "X-IG-Capabilities": "3brTvw==",
+        "X-IG-App-Startup-Country": "US",
+    }
+
+    user_id = None
+    story_items = None
+
+    # === USER ID OLISH — 3 xil usul ===
+    # Usul 1: Web API
+    async with aiohttp.ClientSession(headers=web_headers) as web_session:
         try:
             user_api_url = f"https://www.instagram.com/api/v1/users/web_profile_info/?username={username}"
-            async with session.get(user_api_url) as resp:
-                if resp.status != 200:
-                    logger.error(f"[IG-API] User ID olish xatosi: status={resp.status}")
-                    # 2-usul: sahifa orqali user ID olishga urinib ko'ramiz
-                    return await _download_instagram_story_page(url, cookies_path, ig_cookies, headers)
-
-                user_data = await resp.json()
-                user_id = user_data.get("data", {}).get("user", {}).get("id")
-                if not user_id:
-                    logger.error(f"[IG-API] User ID topilmadi: {user_data}")
-                    return await _download_instagram_story_page(url, cookies_path, ig_cookies, headers)
-
+            async with web_session.get(user_api_url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                if resp.status == 429:
+                    logger.warning("[IG-API] Web API 429 rate limit — mobile API sinab ko'rilmoqda...")
+                elif resp.status == 200:
+                    user_data = await resp.json()
+                    user_id = user_data.get("data", {}).get("user", {}).get("id")
+                    if user_id:
+                        logger.info(f"[IG-API] Web API: User ID={user_id}")
+                else:
+                    logger.warning(f"[IG-API] Web API user ID xatosi: status={resp.status}")
         except Exception as e:
-            logger.error(f"[IG-API] User ID olish xatosi: {e}")
-            return await _download_instagram_story_page(url, cookies_path, ig_cookies, headers)
+            logger.warning(f"[IG-API] Web API user ID xatosi: {e}")
 
-        logger.info(f"[IG-API] User ID: {user_id}")
+    # Usul 2: Mobile API (429 bo'lsa)
+    if not user_id:
+        async with aiohttp.ClientSession(headers=mobile_headers) as mobile_session:
+            try:
+                # Kichik kutish — 429 oldini olish uchun
+                await asyncio.sleep(0.5)
+                mobile_user_url = f"https://i.instagram.com/api/v1/users/{username}/usernameinfo/"
+                async with mobile_session.get(mobile_user_url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                    if resp.status == 200:
+                        user_data = await resp.json()
+                        user_id = user_data.get("user", {}).get("pk") or user_data.get("user", {}).get("id")
+                        if user_id:
+                            logger.info(f"[IG-API] Mobile API: User ID={user_id}")
+                    elif resp.status == 429:
+                        logger.warning("[IG-API] Mobile API ham 429 — kutib qayta urinamiz...")
+                        await asyncio.sleep(2)
+                        async with mobile_session.get(mobile_user_url, timeout=aiohttp.ClientTimeout(total=8)) as resp2:
+                            if resp2.status == 200:
+                                user_data = await resp2.json()
+                                user_id = user_data.get("user", {}).get("pk") or user_data.get("user", {}).get("id")
+                                if user_id:
+                                    logger.info(f"[IG-API] Mobile API retry: User ID={user_id}")
+                            else:
+                                logger.warning(f"[IG-API] Mobile API retry: status={resp2.status}")
+                    else:
+                        logger.warning(f"[IG-API] Mobile API user ID xatosi: status={resp.status}")
+            except Exception as e:
+                logger.warning(f"[IG-API] Mobile API user ID xatosi: {e}")
 
-        # 2-qadam: User story'larini olish
-        try:
-            story_api_url = f"https://www.instagram.com/api/v1/feed/user/{user_id}/story/"
-            async with session.get(story_api_url) as resp:
-                if resp.status != 200:
-                    logger.error(f"[IG-API] Story API xatosi: status={resp.status}")
-                    return await _download_instagram_story_page(url, cookies_path, ig_cookies, headers)
-
-                story_data = await resp.json()
-                items = story_data.get("items", [])
-
-                if not items:
-                    logger.error("[IG-API] Story topilmadi (bo'sh yoki faol emas)")
-                    return None
-
-        except Exception as e:
-            logger.error(f"[IG-API] Story API xatosi: {e}")
-            return await _download_instagram_story_page(url, cookies_path, ig_cookies, headers)
-
-        # 3-qadam: Kerakli story'ni topish
-        target_item = None
-
-        if story_id:
-            # Ma'lum bir story ID bo'yicha qidirish
-            for item in items:
-                item_id = str(item.get("id", ""))
-                # Instagram story ID formati: "12345678901234567_12345678901"
-                if item_id.startswith(story_id) or story_id in item_id:
-                    target_item = item
-                    break
-
-        if not target_item and items:
-            # Story ID topilmadi yoki berilmadi - oxirgi (eng yangi) story'ni olish
-            if story_id:
-                logger.warning(f"[IG-API] Story ID {story_id} topilmadi, oxirgi story olinmoqda")
-            target_item = items[-1]
-
-        if not target_item:
-            logger.error("[IG-API] Hech qanday story topilmadi")
+    # Usul 3: Sahifa orqali user_id olish
+    if not user_id:
+        logger.info("[IG-API] API lar ishlamadi — sahifa orqali user_id olinmoqda...")
+        user_id = await _get_instagram_user_id_from_page(username, web_headers)
+        if not user_id:
+            logger.error("[IG-API] Barcha usullar bilan user_id olib bo'lmadi")
             return None
 
-        # 4-qadam: Story media URL olish va yuklab olish
-        return await _download_story_item(session, target_item, username)
+    logger.info(f"[IG-API] User ID: {user_id}")
+
+    # === STORY LARNI OLISH — 2 xil API ===
+    # 1-usul: Web API
+    async with aiohttp.ClientSession(headers=web_headers) as web_session:
+        try:
+            story_api_url = f"https://www.instagram.com/api/v1/feed/user/{user_id}/story/"
+            async with web_session.get(story_api_url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                if resp.status == 200:
+                    story_data = await resp.json()
+                    story_items = story_data.get("items", [])
+                    if story_items:
+                        logger.info(f"[IG-API] Web API: {len(story_items)} ta story topildi")
+                elif resp.status == 429:
+                    logger.warning("[IG-API] Story Web API 429 — mobile API sinab ko'rilmoqda...")
+                else:
+                    logger.warning(f"[IG-API] Story Web API xatosi: status={resp.status}")
+        except Exception as e:
+            logger.warning(f"[IG-API] Story Web API xatosi: {e}")
+
+    # 2-usul: Mobile API
+    if not story_items:
+        async with aiohttp.ClientSession(headers=mobile_headers) as mobile_session:
+            try:
+                await asyncio.sleep(0.5)
+                mobile_story_url = f"https://i.instagram.com/api/v1/feed/user/{user_id}/story/"
+                async with mobile_session.get(mobile_story_url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                    if resp.status == 200:
+                        story_data = await resp.json()
+                        story_items = story_data.get("items", [])
+                        if story_items:
+                            logger.info(f"[IG-API] Mobile API: {len(story_items)} ta story topildi")
+                    elif resp.status == 429:
+                        logger.warning("[IG-API] Story Mobile API ham 429 — kutib qayta urinamiz...")
+                        await asyncio.sleep(3)
+                        async with mobile_session.get(mobile_story_url, timeout=aiohttp.ClientTimeout(total=8)) as resp2:
+                            if resp2.status == 200:
+                                story_data = await resp2.json()
+                                story_items = story_data.get("items", [])
+                                if story_items:
+                                    logger.info(f"[IG-API] Mobile API retry: {len(story_items)} ta story topildi")
+                            else:
+                                logger.warning(f"[IG-API] Story Mobile API retry: status={resp2.status}")
+                    else:
+                        logger.warning(f"[IG-API] Story Mobile API xatosi: status={resp.status}")
+            except Exception as e:
+                logger.warning(f"[IG-API] Story Mobile API xatosi: {e}")
+
+    if not story_items:
+        logger.error("[IG-API] Story topilmadi (bo'sh, faol emas, yoki barcha API 429)")
+        return None
+
+    # Kerakli story'ni topish
+    target_item = None
+
+    if story_id:
+        for item in story_items:
+            item_id = str(item.get("id", ""))
+            if item_id.startswith(story_id) or story_id in item_id:
+                target_item = item
+                break
+
+    if not target_item and story_items:
+        if story_id:
+            logger.warning(f"[IG-API] Story ID {story_id} topilmadi, oxirgi story olinmoqda")
+        target_item = story_items[-1]
+
+    if not target_item:
+        logger.error("[IG-API] Hech qanday story topilmadi")
+        return None
+
+    # Story media URL olish va yuklab olish
+    return await _download_story_item(target_item, username)
+
+
+async def _get_instagram_user_id_from_page(username: str, headers: Dict[str, str]) -> Optional[str]:
+    """Instagram sahifasidan user_id ajratib olish.
+
+    API ishlamaganda (429), sahifa HTML dan user_id ni qidirish.
+    Instagram sahifasida "user_id":"12345678" ko'rinishida bo'ladi.
+    """
+    import aiohttp
+
+    try:
+        async with aiohttp.ClientSession(headers=headers) as session:
+            async with session.get(
+                f"https://www.instagram.com/{username}/",
+                timeout=aiohttp.ClientTimeout(total=8),
+                allow_redirects=True
+            ) as resp:
+                if resp.status != 200:
+                    logger.warning(f"[IG-PAGE] Sahifa ochish xatosi: status={resp.status}")
+                    return None
+
+                html = await resp.text()
+
+                # Usul 1: "user_id":"12345678" pattern
+                user_id_match = re.search(r'"user_id"\s*:\s*"(\d+)"', html)
+                if user_id_match:
+                    uid = user_id_match.group(1)
+                    logger.info(f"[IG-PAGE] user_id topildi: {uid}")
+                    return uid
+
+                # Usul 2: "id":"12345678" Instagram user object ichida
+                id_match = re.search(r'"id"\s*:\s*"(\d{10,})"', html)
+                if id_match:
+                    uid = id_match.group(1)
+                    logger.info(f"[IG-PAGE] id topildi: {uid}")
+                    return uid
+
+                # Usul 3: profilePage_12345678 pattern
+                profile_match = re.search(r'profilePage_(\d+)', html)
+                if profile_match:
+                    uid = profile_match.group(1)
+                    logger.info(f"[IG-PAGE] profilePage id topildi: {uid}")
+                    return uid
+
+                # Usul 4: owner.id pattern
+                owner_match = re.search(r'"owner"\s*:\s*\{[^}]*"id"\s*:\s*"(\d+)"', html)
+                if owner_match:
+                    uid = owner_match.group(1)
+                    logger.info(f"[IG-PAGE] owner.id topildi: {uid}")
+                    return uid
+
+                logger.warning("[IG-PAGE] Sahifadan user_id topilmadi")
+                return None
+
+    except Exception as e:
+        logger.error(f"[IG-PAGE] Sahifa yuklash xatosi: {e}")
+        return None
 
 
 async def _download_instagram_story_page(url: str, cookies_path: str,
@@ -550,7 +702,7 @@ async def _download_instagram_story_page(url: str, cookies_path: str,
             return None
 
 
-async def _download_story_item(session, item: dict, username: str) -> Optional[Tuple[str, Dict[str, Any]]]:
+async def _download_story_item(item: dict, username: str) -> Optional[Tuple[str, Dict[str, Any]]]:
     """Instagram story itemdan video/rasm yuklash."""
     item_id = str(item.get("id", "unknown"))
     media_type = item.get("media_type", 0)  # 1=rasm, 2=video
@@ -895,20 +1047,24 @@ async def _extract_youtube_info(url: str) -> Optional[Dict[str, Any]]:
             if use_cookies:
                 opts["cookiefile"] = cookies_path
 
-            # Proxy qo'shish (YOUTUBE_PROXY yoki HTTP_PROXY/HTTPS_PROXY)
-            # Agar proxy buzilgan bo'lsa (407), ishlatmaymiz!
-            proxy = os.getenv("YOUTUBE_PROXY", "") or os.getenv("HTTP_PROXY", "") or os.getenv("HTTPS_PROXY", "")
+            # Proxy — platformaga mos (YouTube uchun YOUTUBE_PROXY)
+            # MUHIM: proxy="" yozish kerak — aks holda yt-dlp HTTP_PROXY env dan o'qiydi!
             proxy_active = False
-            if proxy:
-                try:
-                    from app.utils.youtube_api import _is_proxy_available
-                    proxy_active = _is_proxy_available()
-                except ImportError:
-                    proxy_active = True
-                if proxy_active:
+            try:
+                from app.utils.youtube_api import get_proxy_for_platform
+                proxy = get_proxy_for_platform("youtube")
+                if proxy:
                     opts["proxy"] = proxy
+                    proxy_active = True
                 else:
-                    logger.info("[yt-dlp info] Proxy BUZILGAN — proxiesz")
+                    opts["proxy"] = ""  # Env dan proxy olmaslik uchun
+            except ImportError:
+                proxy = os.getenv("YOUTUBE_PROXY", "") or os.getenv("HTTP_PROXY", "") or os.getenv("HTTPS_PROXY", "")
+                if proxy:
+                    opts["proxy"] = proxy
+                    proxy_active = True
+                else:
+                    opts["proxy"] = ""
 
             logger.info(f"[YouTube] yt-dlp info: {label} (proxy: {'bor' if proxy_active else 'yo\'q'})")
 
@@ -1004,15 +1160,15 @@ async def _extract_non_youtube_info(url: str, platform: str) -> Optional[Dict[st
             if platform == "instagram" and use_cookies:
                 opts["extractor_args"] = {"instagram": {"api": ["graphql"]}}
 
-            # Proxy — agar buzilgan bo'lsa (407), ishlatmaymiz!
-            proxy = os.getenv("HTTP_PROXY") or os.getenv("HTTPS_PROXY")
-            if proxy:
-                try:
-                    from app.utils.youtube_api import _is_proxy_available
-                    if _is_proxy_available():
-                        opts["proxy"] = proxy
-                except ImportError:
+            # Proxy — platformaga mos (Instagram uchun INSTAGRAM_PROXY, boshqalar uchun yo'q)
+            try:
+                from app.utils.youtube_api import get_proxy_for_platform
+                proxy = get_proxy_for_platform(platform)
+                if proxy:
                     opts["proxy"] = proxy
+            except ImportError:
+                # Fallback — Instagram uchun proxy ishlatmaymiz
+                pass
 
             label = "cookies" if use_cookies else "cookiesiz"
             if platform == "instagram" and use_cookies:
@@ -1027,11 +1183,15 @@ async def _extract_non_youtube_info(url: str, platform: str) -> Optional[Dict[st
         except Exception as e:
             err_str = str(e)
             logger.warning(f"[{platform}] {label} xato: {err_str[:100]}")
-            # 407 Proxy Auth Required — proxy ni buzilgan deb belgilash
+            # 407 Proxy Auth Required — platformaga mos proxy ni buzilgan deb belgilash
             if "407" in err_str or "Proxy Authentication Required" in err_str:
                 try:
-                    from app.utils.youtube_api import _mark_proxy_broken
-                    _mark_proxy_broken(f"407 from yt-dlp ({platform})")
+                    if platform == "instagram":
+                        from app.utils.youtube_api import _mark_instagram_proxy_broken
+                        _mark_instagram_proxy_broken(f"407 from yt-dlp ({platform})")
+                    else:
+                        from app.utils.youtube_api import _mark_proxy_broken
+                        _mark_proxy_broken(f"407 from yt-dlp ({platform})")
                 except ImportError:
                     pass
             # Instagram story + login xatosi → API fallback
@@ -1118,22 +1278,25 @@ async def _download_youtube(url: str, quality: str = "720",
     for i, (label, extractor_args) in enumerate(player_clients):
         use_cookies = "cookies" in label
         try:
-            # Proxy holatini tekshirish — 407 bo'lsa, ishlatmaymiz!
-            proxy = os.getenv("YOUTUBE_PROXY", "") or os.getenv("HTTP_PROXY", "") or os.getenv("HTTPS_PROXY", "")
+            # Proxy — platformaga mos (YouTube uchun YOUTUBE_PROXY)
             proxy_active = False
-            if proxy:
-                try:
-                    from app.utils.youtube_api import _is_proxy_available
-                    proxy_active = _is_proxy_available()
-                except ImportError:
-                    proxy_active = True
+            try:
+                from app.utils.youtube_api import get_proxy_for_platform
+                proxy = get_proxy_for_platform("youtube")
+            except ImportError:
+                proxy = os.getenv("YOUTUBE_PROXY", "") or os.getenv("HTTP_PROXY", "") or os.getenv("HTTPS_PROXY", "")
 
-            logger.info(f"[YouTube] yt-dlp yuklash {i+1}/{len(player_clients)}: {label} (proxy: {'bor' if proxy_active else 'yo\'q'})")
+            logger.info(f"[YouTube] yt-dlp yuklash {i+1}/{len(player_clients)}: {label} (proxy: {'bor' if proxy else 'yo\'q'})")
 
-            opts = _build_download_opts(output_path, quality, audio_only, use_cookies, "best")
+            opts = _build_download_opts(output_path, quality, audio_only, use_cookies, "best", "youtube")
             opts["geo_bypass"] = "US"
             opts["geo_bypass_country"] = "US"
             opts["socket_timeout"] = 8
+
+            # _build_download_opts allaqachon proxy="" yoki proxy=URL qo'ydi
+            # proxy="" — yt-dlp env dan ham proxy olmaydi (MUHIM!)
+            # Agar proxy bor bo'lsa, opts["proxy"] = proxy_url bo'ladi
+            # Agar proxy yo'q/buzilgan bo'lsa, opts["proxy"] = "" bo'ladi
 
             # PO Token qo'shish
             if po_token:
@@ -1235,7 +1398,7 @@ async def _download_non_youtube(url: str, quality: str, audio_only: bool) -> Opt
             # 2-urinish: yt-dlp (faqat 1 marta, API ishlamasa)
             output_path = tempfile.mkdtemp()
             try:
-                opts = _build_download_opts(output_path, quality, audio_only, True, "best")
+                opts = _build_download_opts(output_path, quality, audio_only, True, "best", "instagram")
                 opts["extractor_args"] = {"instagram": {"api": ["graphql"]}}
                 opts["socket_timeout"] = 8
 
@@ -1263,11 +1426,11 @@ async def _download_non_youtube(url: str, quality: str, audio_only: bool) -> Opt
             except Exception as e:
                 err_str = str(e)
                 logger.warning(f"[{platform}] Story yt-dlp xato: {err_str[:80]}")
-                # 407 — proxy buzilgan
+                # 407 — Instagram proxy buzilgan
                 if "407" in err_str or "Proxy Authentication Required" in err_str:
                     try:
-                        from app.utils.youtube_api import _mark_proxy_broken
-                        _mark_proxy_broken(f"407 from yt-dlp ({platform} story)")
+                        from app.utils.youtube_api import _mark_instagram_proxy_broken
+                        _mark_instagram_proxy_broken(f"407 from yt-dlp ({platform} story)")
                     except ImportError:
                         pass
 
