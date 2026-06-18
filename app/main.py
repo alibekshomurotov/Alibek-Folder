@@ -1,111 +1,109 @@
-"""Video Downloader Pro - Main Entry Point"""
-
 import asyncio
 import logging
+import os
+import signal
 import sys
 
 from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 
-from app.config import config
-from app.database import init_db, close_db
+from app.handlers import start, video, profile, admin, cancel
+from app.middleware.throttle import ThrottleMiddleware
+from app.middleware.auth import AuthMiddleware
+from app.middleware.logging import LoggingMiddleware
+from app.utils.db import init_db
 
-# Configure logging
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+
 logging.basicConfig(
-    level=getattr(logging, config.log_level, logging.INFO),
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-    ],
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
+# Global bot reference for shutdown
+_bot = None
+_dp = None
+
+
+async def shutdown(sig=None):
+    """To'g'ri shutdown — pollingni to'xtatib, bot sessionni yopadi."""
+    global _bot, _dp
+    logger.info(f"🛑 Shutdown signal olindi: {sig}")
+    if _dp:
+        try:
+            await _dp.stop_polling()
+            logger.info("✅ Polling to'xtatildi")
+        except Exception as e:
+            logger.error(f"Polling to'xtatishda xato: {e}")
+    if _bot:
+        try:
+            await _bot.session.close()
+            logger.info("✅ Bot session yopildi")
+        except Exception as e:
+            logger.error(f"Session yopishda xato: {e}")
+
 
 async def main():
-    """Main function to start the bot"""
-    # Validate config
-    if not config.bot.token:
-        logger.error("BOT_TOKEN is not set! Please set it in .env file or environment variables.")
+    global _bot, _dp
+
+    if not BOT_TOKEN:
+        logger.error("❌ BOT_TOKEN topilmadi! .env faylini tekshiring.")
         sys.exit(1)
 
-    # Initialize database
-    logger.info("Initializing database...")
-    await init_db()
-    logger.info("Database initialized.")
-
-    # Create bot and dispatcher
-    bot = Bot(
-        token=config.bot.token,
-        default=DefaultBotProperties(
-            parse_mode=ParseMode.HTML,
-        ),
+    _bot = Bot(
+        token=BOT_TOKEN,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML)
     )
 
-    dp = Dispatcher()
+    _dp = Dispatcher()
 
-    # Register middleware
-    from app.middleware.auth import AuthMiddleware
-    from app.middleware.throttle import ThrottleMiddleware
-    from app.middleware.logging import LoggingMiddleware
+    # Middleware lar
+    _dp.message.middleware(ThrottleMiddleware())
+    _dp.message.middleware(AuthMiddleware())
+    _dp.message.middleware(LoggingMiddleware())
+    _dp.callback_query.middleware(AuthMiddleware())
 
-    dp.message.middleware(ThrottleMiddleware())
-    dp.callback_query.middleware(ThrottleMiddleware())
-    dp.message.middleware(AuthMiddleware())
-    dp.callback_query.middleware(AuthMiddleware())
-    dp.message.middleware(LoggingMiddleware())
-    dp.callback_query.middleware(LoggingMiddleware())
+    # Router larni ro'yxatdan o'tkazish (TARTIB MUHIM: admin oxirida)
+    _dp.include_router(start.router)
+    _dp.include_router(video.router)
+    _dp.include_router(profile.router)
+    _dp.include_router(cancel.router)
+    _dp.include_router(admin.router)
 
-    # Register handlers
-    from app.handlers.start import router as start_router
-    from app.handlers.video import router as video_router
-    from app.handlers.profile import router as profile_router
-    from app.handlers.admin import router as admin_router
-    from app.handlers.callback_cancel import router as cancel_router
+    # DB ni ishga tushirish
+    await init_db()
+    logger.info("✅ Database tayyor")
 
-    dp.include_router(start_router)
-    dp.include_router(video_router)
-    dp.include_router(profile_router)
-    dp.include_router(admin_router)
-    dp.include_router(cancel_router)
-
-    logger.info("Starting Video Downloader Pro bot...")
-
-    # Check FFmpeg
-    if config.download.ffmpeg_available:
-        logger.info("FFmpeg detected - full quality support enabled")
-    else:
-        logger.warning("FFmpeg not found - limited quality support (pre-merged formats only)")
-
-    # Start polling or webhook
-    if config.webhook.enabled and config.webhook.url:
-        logger.info(f"Starting webhook mode at {config.webhook.url}")
-        await bot.set_webhook(
-            url=config.webhook.url,
-            drop_pending_updates=True,
-        )
-        from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-        from aiohttp import web
-
-        app = web.Application()
-        SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path="/webhook")
-        setup_application(app, dp, bot=bot)
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, config.webhook.host, config.webhook.port)
-        await site.start()
-        await asyncio.Event().wait()
-    else:
-        logger.info("Starting polling mode...")
-        await bot.delete_webhook(drop_pending_updates=True)
+    # Signal handling
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
         try:
-            await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
-        finally:
-            await close_db()
+            loop.add_signal_handler(sig, lambda s=sig: asyncio.create_task(shutdown(s)))
+        except NotImplementedError:
+            # Windows da signal handler ishlamaydi
+            pass
+
+    logger.info("🤖 Bot ishga tushdi...")
+
+    # Polling — close_bot_session=True agar shutdown to'g'ri ishlasa
+    # allow_restart=False — qayta boshlashni oldini oladi
+    try:
+        await _dp.start_polling(
+            _bot,
+            close_bot_session=False,  # Biz o'zimiz yopamiz shutdown() da
+            allowed_updates=["message", "callback_query"],
+        )
+    except (KeyboardInterrupt, SystemExit):
+        pass
+    finally:
+        await shutdown("finally block")
+        logger.info("👋 Bot to'xtatildi")
 
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
-        logger.info("Bot stopped.")
+        pass
