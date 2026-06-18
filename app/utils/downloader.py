@@ -1,3 +1,4 @@
+
 import os
 import logging
 import re
@@ -256,7 +257,7 @@ def get_format_selector(quality: str = "720", audio_only: bool = False) -> str:
         )
 
 
-def _build_base_opts(use_cookies: bool = True) -> Dict[str, Any]:
+def _build_base_opts(use_cookies: bool = True, platform: str = "youtube") -> Dict[str, Any]:
     opts = {
         "quiet": True,
         "no_warnings": True,
@@ -276,24 +277,41 @@ def _build_base_opts(use_cookies: bool = True) -> Dict[str, Any]:
         if cookies_path:
             opts["cookiefile"] = cookies_path
 
-    # PO Token qo'shish
-    po_token = os.getenv("PO_TOKEN", "")
-    if po_token:
-        opts.setdefault("extractor_args", {}).setdefault("youtube", {})["po_token"] = f"web+{po_token}"
+    # PO Token qo'shish (faqat YouTube uchun)
+    if platform == "youtube":
+        po_token = os.getenv("PO_TOKEN", "")
+        if po_token:
+            opts.setdefault("extractor_args", {}).setdefault("youtube", {})["po_token"] = f"web+{po_token}"
 
-    # Proxy qo'shish (YOUTUBE_PROXY yoki HTTP_PROXY/HTTPS_PROXY)
-    proxy = os.getenv("YOUTUBE_PROXY", "") or os.getenv("HTTP_PROXY", "") or os.getenv("HTTPS_PROXY", "")
-    if proxy:
-        opts["proxy"] = proxy
-        logger.debug(f"[yt-dlp] Proxy ishlatilmoqda: {proxy.split('@')[-1]}")
+    # Proxy — platformaga mos ravishda
+    # YouTube → YOUTUBE_PROXY (datacenter IP blokirovkasi uchun)
+    # Instagram → INSTAGRAM_PROXY (ixtiyoriy, alohida)
+    # Boshqa → proxy ishlatilmaydi
+    try:
+        from app.utils.youtube_api import get_proxy_for_platform
+        proxy = get_proxy_for_platform(platform)
+        if proxy:
+            opts["proxy"] = proxy
+            logger.debug(f"[yt-dlp] {platform} proxy ishlatilmoqda: {proxy.split('@')[-1]}")
+        else:
+            if platform == "youtube":
+                yt_proxy = os.getenv("YOUTUBE_PROXY", "") or os.getenv("HTTP_PROXY", "") or os.getenv("HTTPS_PROXY", "")
+                if yt_proxy:
+                    logger.info(f"[yt-dlp] {platform}: Proxy BUZILGAN — proxysz ishlatilmoqda")
+    except ImportError:
+        # Fallback — faqat YouTube uchun eski usul
+        if platform == "youtube":
+            proxy = os.getenv("YOUTUBE_PROXY", "") or os.getenv("HTTP_PROXY", "") or os.getenv("HTTPS_PROXY", "")
+            if proxy:
+                opts["proxy"] = proxy
 
     return opts
 
 
 def _build_download_opts(output_path: str, quality: str = "720",
                          audio_only: bool = False, use_cookies: bool = True,
-                         format_override: str = None) -> Dict[str, Any]:
-    opts = _build_base_opts(use_cookies)
+                         format_override: str = None, platform: str = "youtube") -> Dict[str, Any]:
+    opts = _build_base_opts(use_cookies, platform)
 
     fmt = format_override or get_format_selector(quality, audio_only)
     opts["format"] = fmt
@@ -878,11 +896,21 @@ async def _extract_youtube_info(url: str) -> Optional[Dict[str, Any]]:
                 opts["cookiefile"] = cookies_path
 
             # Proxy qo'shish (YOUTUBE_PROXY yoki HTTP_PROXY/HTTPS_PROXY)
+            # Agar proxy buzilgan bo'lsa (407), ishlatmaymiz!
             proxy = os.getenv("YOUTUBE_PROXY", "") or os.getenv("HTTP_PROXY", "") or os.getenv("HTTPS_PROXY", "")
+            proxy_active = False
             if proxy:
-                opts["proxy"] = proxy
+                try:
+                    from app.utils.youtube_api import _is_proxy_available
+                    proxy_active = _is_proxy_available()
+                except ImportError:
+                    proxy_active = True
+                if proxy_active:
+                    opts["proxy"] = proxy
+                else:
+                    logger.info("[yt-dlp info] Proxy BUZILGAN — proxiesz")
 
-            logger.info(f"[YouTube] yt-dlp info: {label} (proxy: {'bor' if proxy else 'yo\'q'})")
+            logger.info(f"[YouTube] yt-dlp info: {label} (proxy: {'bor' if proxy_active else 'yo\'q'})")
 
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
@@ -976,9 +1004,15 @@ async def _extract_non_youtube_info(url: str, platform: str) -> Optional[Dict[st
             if platform == "instagram" and use_cookies:
                 opts["extractor_args"] = {"instagram": {"api": ["graphql"]}}
 
+            # Proxy — agar buzilgan bo'lsa (407), ishlatmaymiz!
             proxy = os.getenv("HTTP_PROXY") or os.getenv("HTTPS_PROXY")
             if proxy:
-                opts["proxy"] = proxy
+                try:
+                    from app.utils.youtube_api import _is_proxy_available
+                    if _is_proxy_available():
+                        opts["proxy"] = proxy
+                except ImportError:
+                    opts["proxy"] = proxy
 
             label = "cookies" if use_cookies else "cookiesiz"
             if platform == "instagram" and use_cookies:
@@ -991,7 +1025,15 @@ async def _extract_non_youtube_info(url: str, platform: str) -> Optional[Dict[st
                     return info
 
         except Exception as e:
-            logger.warning(f"[{platform}] {label} xato: {str(e)[:100]}")
+            err_str = str(e)
+            logger.warning(f"[{platform}] {label} xato: {err_str[:100]}")
+            # 407 Proxy Auth Required — proxy ni buzilgan deb belgilash
+            if "407" in err_str or "Proxy Authentication Required" in err_str:
+                try:
+                    from app.utils.youtube_api import _mark_proxy_broken
+                    _mark_proxy_broken(f"407 from yt-dlp ({platform})")
+                except ImportError:
+                    pass
             # Instagram story + login xatosi → API fallback
             if is_story and _is_login_required_error(e):
                 logger.info(f"[{platform}] yt-dlp story uchun ishlamadi, API fallback sinab ko'rilmoqda...")
@@ -1076,8 +1118,17 @@ async def _download_youtube(url: str, quality: str = "720",
     for i, (label, extractor_args) in enumerate(player_clients):
         use_cookies = "cookies" in label
         try:
+            # Proxy holatini tekshirish — 407 bo'lsa, ishlatmaymiz!
             proxy = os.getenv("YOUTUBE_PROXY", "") or os.getenv("HTTP_PROXY", "") or os.getenv("HTTPS_PROXY", "")
-            logger.info(f"[YouTube] yt-dlp yuklash {i+1}/{len(player_clients)}: {label} (proxy: {'bor' if proxy else 'yo\'q'})")
+            proxy_active = False
+            if proxy:
+                try:
+                    from app.utils.youtube_api import _is_proxy_available
+                    proxy_active = _is_proxy_available()
+                except ImportError:
+                    proxy_active = True
+
+            logger.info(f"[YouTube] yt-dlp yuklash {i+1}/{len(player_clients)}: {label} (proxy: {'bor' if proxy_active else 'yo\'q'})")
 
             opts = _build_download_opts(output_path, quality, audio_only, use_cookies, "best")
             opts["geo_bypass"] = "US"
@@ -1132,6 +1183,15 @@ async def _download_youtube(url: str, quality: str = "720",
 
         except Exception as e:
             err_str = str(e)
+            # 407 Proxy Auth Required — proxy ni buzilgan deb belgilash va keyingi urinishlarni to'xtatish
+            if "407" in err_str or "Proxy Authentication Required" in err_str:
+                logger.warning(f"[YouTube] yt-dlp {label}: 407 Proxy Auth Required — proxy BUZILGAN!")
+                try:
+                    from app.utils.youtube_api import _mark_proxy_broken
+                    _mark_proxy_broken("407 from yt-dlp")
+                except ImportError:
+                    pass
+                break  # Proxy buzilgan — keyingi urinishlar ham ishlamaydi
             if "MaxDownloads" in str(type(e).__name__) or "MaxDownloads" in err_str:
                 logger.warning("[YouTube] Fayl hajmi cheklovdan oshdi")
                 return None
@@ -1229,7 +1289,7 @@ async def _download_non_youtube(url: str, quality: str, audio_only: bool) -> Opt
 
     for i, (use_cookies, fmt_override) in enumerate(attempts, 1):
         try:
-            opts = _build_download_opts(output_path, quality, audio_only, use_cookies, fmt_override)
+            opts = _build_download_opts(output_path, quality, audio_only, use_cookies, fmt_override, platform)
             opts["socket_timeout"] = 8
 
             label = "cookies" if use_cookies else "cookiesiz"
@@ -1258,7 +1318,20 @@ async def _download_non_youtube(url: str, quality: str, audio_only: bool) -> Opt
                 return file_path, info
 
         except Exception as e:
-            logger.warning(f"[{platform}] Yuklash xatosi ({label}): {str(e)[:80]}")
+            err_str = str(e)
+            logger.warning(f"[{platform}] Yuklash xatosi ({label}): {err_str[:80]}")
+            # 407 Proxy Auth Required — platformaga mos proxy ni buzilgan deb belgilash
+            if "407" in err_str or "Proxy Authentication Required" in err_str:
+                try:
+                    if platform == "instagram":
+                        from app.utils.youtube_api import _mark_instagram_proxy_broken
+                        _mark_instagram_proxy_broken(f"407 from yt-dlp ({platform})")
+                    else:
+                        from app.utils.youtube_api import _mark_proxy_broken
+                        _mark_proxy_broken(f"407 from yt-dlp ({platform})")
+                except ImportError:
+                    pass
+                break  # Proxy buzilgan — keyingi urinishlar ham ishlamaydi
             continue
 
     logger.error(f"[{platform}] Barcha yuklash urinishlari muvaffaqiyatsiz")
