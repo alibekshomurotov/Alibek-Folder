@@ -1,4 +1,3 @@
-"""Download Service - Business logic for video downloads"""
 
 import logging
 import os
@@ -30,6 +29,9 @@ class DownloadService:
         """
         Process a video URL: extract info and return video details.
 
+        YouTube uchun youtube_api.py ishlatiladi.
+        Boshqa platformalar uchun yt-dlp ishlatiladi.
+
         Returns:
             Dict with 'info', 'platform', 'available_qualities' or None
         """
@@ -37,7 +39,72 @@ class DownloadService:
         if not platform:
             return None
 
-        info = await extract_video_info(url)
+        info = None
+
+        if platform == "youtube":
+            # YouTube uchun youtube_api.py ishlatamiz
+            try:
+                import youtube_api
+                api_result = await youtube_api.get_youtube_info_via_api(url)
+
+                if api_result:
+                    source = api_result.get("source", "")
+
+                    if source == "innertube":
+                        # InnerTube to'liq info beradi
+                        video_details = api_result["data"].get("videoDetails", {})
+                        info = {
+                            "id": api_result.get("video_id", ""),
+                            "title": video_details.get("title", "YouTube Video"),
+                            "description": video_details.get("shortDescription", ""),
+                            "duration": int(video_details.get("lengthSeconds", 0)),
+                            "view_count": int(video_details.get("viewCount", 0)),
+                            "uploader": video_details.get("author", ""),
+                            "thumbnail": video_details.get("thumbnail", {}).get("thumbnails", [{}])[-1].get("url", ""),
+                            "webpage_url": url,
+                            "extractor": "youtube",
+                            "formats": [],
+                        }
+                    elif source in ("invidious", "piped"):
+                        # API natijasini yt-dlp formatiga o'giramiz
+                        info = youtube_api.convert_api_info_to_ytdlp(api_result)
+                    elif source == "cobalt":
+                        # Cobalt faqat URL beradi, basic info
+                        info = {
+                            "id": api_result.get("video_id", ""),
+                            "title": "YouTube Video",
+                            "description": "",
+                            "duration": 0,
+                            "view_count": 0,
+                            "uploader": "YouTube",
+                            "thumbnail": f"https://img.youtube.com/vi/{api_result.get('video_id', '')}/maxresdefault.jpg",
+                            "webpage_url": url,
+                            "extractor": "youtube",
+                            "formats": [],
+                        }
+
+                    if info:
+                        logger.info(f"[DownloadService] YouTube info olindi (source={source})")
+                        # Barcha sifat variantlarini qo'shamiz
+                        if not info.get("formats"):
+                            info["formats"] = []
+                        # Default quality list
+                        return {
+                            "info": info,
+                            "platform": platform,
+                            "available_qualities": ["1080p", "720p", "480p", "360p"],
+                            "estimated_size": "N/A",
+                        }
+
+            except Exception as e:
+                logger.error(f"[DownloadService] youtube_api xatosi: {e}")
+                # Fallback to yt-dlp
+                logger.info("[DownloadService] yt-dlp fallback...")
+                info = await extract_video_info(url)
+        else:
+            # Boshqa platformalar (TikTok, Instagram, etc.) — yt-dlp
+            info = await extract_video_info(url)
+
         if not info:
             return None
 
@@ -79,6 +146,9 @@ class DownloadService:
         """
         Download a video/audio file.
 
+        YouTube uchun youtube_api.py ishlatiladi.
+        Boshqa platformalar uchun yt-dlp ishlatiladi.
+
         Returns:
             Dict with 'file_path', 'info', 'platform', 'file_size_mb' or None
         """
@@ -88,35 +158,67 @@ class DownloadService:
 
         quality_num = quality.replace("p", "")
 
-        if audio_only:
-            result = await download_video(url, quality_num, audio_only=True)
+        if platform == "youtube":
+            # YouTube uchun youtube_api.py ishlatamiz
+            try:
+                import youtube_api
+                result = await youtube_api.download_youtube_via_api(
+                    url, quality_num, audio_only
+                )
+
+                if result:
+                    file_path, info = result
+                    file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+
+                    # Database ga yozish
+                    if user_id:
+                        await DownloadService._record_download(user_id, platform, url, quality, file_size_mb)
+
+                    return {
+                        "file_path": file_path,
+                        "info": info,
+                        "platform": platform,
+                        "file_size_mb": file_size_mb,
+                        "quality": quality,
+                    }
+                else:
+                    logger.warning("[DownloadService] youtube_api yuklash muvaffaqiyatsiz")
+                    # Fallback to yt-dlp
+                    logger.info("[DownloadService] yt-dlp fallback yuklash...")
+                    result = await download_video(url, quality_num, audio_only=audio_only)
+                    if result:
+                        return await DownloadService._process_download_result(result, url, platform, quality, audio_only, user_id)
+                    return None
+
+            except Exception as e:
+                logger.error(f"[DownloadService] youtube_api download xatosi: {e}")
+                # Fallback to yt-dlp
+                logger.info("[DownloadService] yt-dlp fallback yuklash...")
+                result = await download_video(url, quality_num, audio_only=audio_only)
+                if result:
+                    return await DownloadService._process_download_result(result, url, platform, quality, audio_only, user_id)
+                return None
         else:
-            result = await download_video_auto_quality(url, quality_num)
+            # Boshqa platformalar — yt-dlp
+            if audio_only:
+                result = await download_video(url, quality_num, audio_only=True)
+            else:
+                result = await download_video_auto_quality(url, quality_num)
 
-        if result is None:
-            return None
+            if result is None:
+                return None
 
+            return await DownloadService._process_download_result(result, url, platform, quality, audio_only, user_id)
+
+    @staticmethod
+    async def _process_download_result(result: Tuple[str, Dict], url: str, platform: str,
+                                        quality: str, audio_only: bool, user_id: int = None) -> Optional[Dict[str, Any]]:
+        """yt-dlp natijasini qayta ishlash."""
         file_path, info = result
         file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
 
-        # Record download in database
         if user_id:
-            try:
-                session_factory = await get_session_factory()
-                async with session_factory() as session:
-                    download_repo = DownloadRepository(session)
-                    user_repo = UserRepository(session)
-
-                    await download_repo.create(
-                        user_id=user_id,
-                        platform=platform,
-                        url=url,
-                        quality=quality,
-                        file_size=file_size_mb,
-                    )
-                    await user_repo.update_download_count(user_id)
-            except Exception as e:
-                logger.error(f"Failed to record download: {e}")
+            await DownloadService._record_download(user_id, platform, url, quality, file_size_mb)
 
         return {
             "file_path": file_path,
@@ -125,3 +227,24 @@ class DownloadService:
             "file_size_mb": file_size_mb,
             "quality": quality,
         }
+
+    @staticmethod
+    async def _record_download(user_id: int, platform: str, url: str,
+                               quality: str, file_size_mb: float):
+        """Download natijasini database ga yozish."""
+        try:
+            session_factory = await get_session_factory()
+            async with session_factory() as session:
+                download_repo = DownloadRepository(session)
+                user_repo = UserRepository(session)
+
+                await download_repo.create(
+                    user_id=user_id,
+                    platform=platform,
+                    url=url,
+                    quality=quality,
+                    file_size=file_size_mb,
+                )
+                await user_repo.update_download_count(user_id)
+        except Exception as e:
+            logger.error(f"Failed to record download: {e}")

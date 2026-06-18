@@ -13,34 +13,36 @@ import aiohttp
 logger = logging.getLogger(__name__)
 
 # Cobalt API - env dan har safar o'qiladi (_try_cobalt ichida)
-# Eski modul o'zgaruvchilari qoldirildi, lekin _try_cobalt da os.getenv() ishlatiladi
 COBALT_API_URL = os.getenv("COBALT_API_URL", "")
 COBALT_API_KEY = os.getenv("COBALT_API_KEY", "")
 
-# Proxy sozlamalari
-YOUTUBE_PROXY = os.getenv("YOUTUBE_PROXY", "") or os.getenv("HTTP_PROXY", "") or os.getenv("HTTPS_PROXY", "")
-# Instagram uchun alohida proxy — YOUTUBE_PROXY Instagram uchun ishlatilmaydi!
-INSTAGRAM_PROXY = os.getenv("INSTAGRAM_PROXY", "")  # Alohida Instagram proxy (ixtiyoriy)
+# Proxy sozlamalari - YOUTUBE_PROXY faqat SOCKS5 proxy qabul qiladi
+# HTTP proxy HTTPS tunnel qila olmaydi (400 Bad Request)
+YOUTUBE_PROXY = os.getenv("YOUTUBE_PROXY", "")
+# Faqat SOCKS5 proxy ishlatamiz
+_USE_SOCKS5_PROXY = YOUTUBE_PROXY.lower().startswith("socks5") if YOUTUBE_PROXY else False
 
-# YouTube proxy holati - agar proxy xato bersa, keyingi so'rovlarda ishlatmaymiz
+# Instagram uchun alohida proxy
+INSTAGRAM_PROXY = os.getenv("INSTAGRAM_PROXY", "")
+
+# YouTube proxy holati
 _proxy_broken = False
-_proxy_broken_since = 0  # Qachon buzilganini kuzatish
+_proxy_broken_since = 0
 _PROXY_RETRY_AFTER = 300  # 5 daqiqadan keyin qayta urinib ko'rish
 
-# Instagram proxy holati - alohida kuzatish
+# Instagram proxy holati
 _ig_proxy_broken = False
 _ig_proxy_broken_since = 0
 _IG_PROXY_RETRY_AFTER = 300
 
-# Cobalt holati - agar HF Space ishlamasa, keyingi so'rovlarda o'tkazib yuboramiz
-_cobalt_broken_until = 0  # timestamp — shu vaqtgacha Cobalt ni o'tkazib yuborish
+# Cobalt holati
+_cobalt_broken_until = 0
 
-# PO Token - YouTube bot detektsiyasini chetlab o'tish uchun
+# PO Token
 PO_TOKEN = os.getenv("PO_TOKEN", "")
 
-# Invidious instances - 2026 yil iyunda yangilangan
+# Invidious instances - 2026 iyun yangilangan
 INVIDIOUS_INSTANCES = [
-    # Eng ishonchli va tez (2026 iyun testdan o'tgan)
     "https://inv.nadeko.net",
     "https://invidious.nerdvpn.de",
     "https://iv.datura.network",
@@ -50,7 +52,6 @@ INVIDIOUS_INSTANCES = [
     "https://invidious.perennialte.ch",
     "https://inv.tux.pizza",
     "https://vid.puffyan.us",
-    # Qo'shimcha instancelar
     "https://invidious.fdn.fr",
     "https://iv.ggtyler.dev",
     "https://inv.oikei.net",
@@ -62,7 +63,7 @@ INVIDIOUS_INSTANCES = [
     "https://inv.citw.lgbt",
 ]
 
-# Piped instances - 2026 yil iyunda yangilangan
+# Piped instances - 2026 iyun yangilangan
 PIPED_INSTANCES = [
     "https://pipedapi.kavin.rocks",
     "https://pipedapi.adminforge.de",
@@ -79,12 +80,10 @@ HEADERS = {
     "Accept": "application/json",
 }
 
-_FAST_INVIDIOUS = INVIDIOUS_INSTANCES[:4]  # 4 ta tezkor
-_FAST_PIPED = PIPED_INSTANCES[:2]  # 2 ta tezkor
+_FAST_INVIDIOUS = INVIDIOUS_INSTANCES[:5]
+_FAST_PIPED = PIPED_INSTANCES[:3]
 
 # InnerTube API klientlari - 2026 iyun yangilangan versiyalar
-# Eslatma: tv/TVHTML5_SIMPLY_EMBEDDED_PLAYER olib tashlandi — "YouTube is no longer supported" xatosi beradi
-# Eslatma: android/ios birinchi uriniladi — PO Token talab qilmaydi
 INNERTUBE_CLIENTS = {
     "android": {
         "clientName": "ANDROID",
@@ -92,7 +91,6 @@ INNERTUBE_CLIENTS = {
         "androidSdkVersion": 35,
         "hl": "en",
         "gl": "US",
-        # Android klient API key bilan ishlaydi — PO Token talab qilmaydi
         "apiKey": "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w",
     },
     "ios": {
@@ -101,22 +99,14 @@ INNERTUBE_CLIENTS = {
         "deviceModel": "iPhone16,2",
         "hl": "en",
         "gl": "US",
-        # iOS klient ham API key bilan ishlaydi
         "apiKey": "AIzaSyB-63vPrdThhKuerbB2N_l7Kwwcxj6yUAc",
     },
-    "web": {
-        "clientName": "WEB",
-        "clientVersion": "2.20260610.00.00",
+    "tv": {
+        "clientName": "TVHTML5_CAST",
+        "clientVersion": "7.20260610.00.00",
         "hl": "en",
         "gl": "US",
-        "apiKey": "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8",
-    },
-    "mweb": {
-        "clientName": "MWEB",
-        "clientVersion": "2.20260610.01.00",
-        "hl": "en",
-        "gl": "US",
-        "apiKey": "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8",
+        "apiKey": "AIzaSyD8nUgaBM3G_3smGBk9AV5FCWx8pFWsBPQ",
     },
     "web_embed": {
         "clientName": "WEB_EMBEDDED_PLAYER",
@@ -126,23 +116,29 @@ INNERTUBE_CLIENTS = {
         "thirdPartyEmbedUrl": "https://www.google.com",
         "apiKey": "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8",
     },
+    "mweb": {
+        "clientName": "MWEB",
+        "clientVersion": "2.20260610.01.00",
+        "hl": "en",
+        "gl": "US",
+        "apiKey": "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8",
+    },
+    "web": {
+        "clientName": "WEB",
+        "clientVersion": "2.20260610.00.00",
+        "hl": "en",
+        "gl": "US",
+        "apiKey": "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8",
+    },
 }
-
-# Cookie cache - avtomatik yangilash uchun
-_cookie_cache: Dict[str, Any] = {"cookies": None, "expires": 0}
 
 
 def _is_proxy_available() -> bool:
-    """Proxy ishlayaptimi tekshirish.
-
-    Agar proxy buzilgan bo'lsa, lekin _PROXY_RETRY_AFTER vaqt o'tgan bo'lsa,
-    qayta urinib ko'rishga ruxsat beramiz.
-    """
+    """SOCKS5 proxy ishlayaptimi tekshirish."""
     global _proxy_broken, _proxy_broken_since
-    if not YOUTUBE_PROXY:
+    if not _USE_SOCKS5_PROXY:
         return False
     if _proxy_broken:
-        # 5 daqiqa o'tgan bo'lsa, qayta urinib ko'rish
         if _proxy_broken_since and (time.time() - _proxy_broken_since > _PROXY_RETRY_AFTER):
             logger.info("[Proxy] Qayta urinib ko'rilmoqda (5 daqiqa o'tdi)...")
             _proxy_broken = False
@@ -153,46 +149,34 @@ def _is_proxy_available() -> bool:
 
 
 def _get_proxy_connector() -> Optional[aiohttp.TCPConnector]:
-    """Proxy uchun aiohttp connector yaratish."""
+    """SOCKS5 proxy uchun aiohttp connector yaratish."""
     if not _is_proxy_available():
         return None
 
-    proxy_type = YOUTUBE_PROXY.lower()
-
-    # SOCKS5 proxy
-    if proxy_type.startswith("socks5"):
-        try:
-            from aiohttp_socks import ProxyConnector
-            return ProxyConnector.from_url(YOUTUBE_PROXY)
-        except ImportError:
-            logger.warning("[Proxy] aiohttp-socks o'rnatilmagan!")
-            return None
-        except Exception as e:
-            logger.warning(f"[Proxy] SOCKS5 connector xatosi: {e}")
-            return None
-
-    return None
+    try:
+        from aiohttp_socks import ProxyConnector
+        return ProxyConnector.from_url(YOUTUBE_PROXY)
+    except ImportError:
+        logger.warning("[Proxy] aiohttp-socks o'rnatilmagan!")
+        return None
+    except Exception as e:
+        logger.warning(f"[Proxy] SOCKS5 connector xatosi: {e}")
+        return None
 
 
 def _get_proxy_url() -> Optional[str]:
-    """aiohttp uchun proxy URL qaytarish."""
-    if _is_proxy_available():
-        return YOUTUBE_PROXY
-    return None
+    """aiohttp uchun proxy URL qaytarish (SOCKS5 connector ishlatilsa None)."""
+    return None  # SOCKS5 doimo connector orqali
 
 
 def _mark_proxy_broken(reason: str = ""):
-    """YouTube proxy buzilgan deb belgilash.
-
-    Barcha modullar (youtube_api.py, downloader.py) bu holatni ko'radi
-    va YouTube proxy ni o'tkazib yuboradi.
-    """
+    """YouTube proxy buzilgan deb belgilash."""
     global _proxy_broken, _proxy_broken_since
     if not _proxy_broken:
         _proxy_broken = True
         _proxy_broken_since = time.time()
         reason_str = f" ({reason})" if reason else ""
-        logger.warning(f"[Proxy] YouTube proxy ishlamadi{reason_str}, endi proxysz ishlatamiz! Qayta urinish: 5 daqiqadan keyin")
+        logger.warning(f"[Proxy] YouTube proxy ishlamadi{reason_str}, proxysz ishlatamiz! Qayta urinish: 5 daqiqadan keyin")
 
 
 def _is_instagram_proxy_available() -> bool:
@@ -217,16 +201,11 @@ def _mark_instagram_proxy_broken(reason: str = ""):
         _ig_proxy_broken = True
         _ig_proxy_broken_since = time.time()
         reason_str = f" ({reason})" if reason else ""
-        logger.warning(f"[IG-Proxy] Instagram proxy ishlamadi{reason_str}, endi proxysz ishlatamiz!")
+        logger.warning(f"[IG-Proxy] Instagram proxy ishlamadi{reason_str}, proxysz ishlatamiz!")
 
 
 def get_proxy_for_platform(platform: str) -> Optional[str]:
-    """Platformaga mos proxy URL qaytarish.
-
-    YouTube → YOUTUBE_PROXY (holatini tekshirish bilan)
-    Instagram → INSTAGRAM_PROXY (holatini tekshirish bilan)
-    Boshqa → Yo'q (proxy ishlatilmaydi)
-    """
+    """Platformaga mos proxy URL qaytarish."""
     if platform == "youtube":
         if _is_proxy_available():
             return YOUTUBE_PROXY
@@ -236,7 +215,6 @@ def get_proxy_for_platform(platform: str) -> Optional[str]:
             return INSTAGRAM_PROXY
         return None
     else:
-        # TikTok va boshqa platformalar uchun proxy ishlatilmaydi
         return None
 
 
@@ -266,36 +244,26 @@ def _extract_video_id(url: str) -> Optional[str]:
 # ============================================================
 
 async def _wake_hf_space(api_url: str) -> bool:
-    """Hugging Face Space ni uyg'otish (sleep mode dan chiqarish).
-
-    HF Space bepul rejimida 5 daqiqadan keyin uxlaydi.
-    Uyg'otish uchun GET so'rov yuboramiz va API tayyor bo'lishini kutamiz.
-    Cobalt v11+: GET / → serverInfo JSON qaytaradi
-
-    MUHIM: Tezlik uchun timeout lar qisqartirilgan.
-    """
+    """Hugging Face Space ni uyg'otish."""
     if ".hf.space" not in api_url:
-        return True  # HF Space emas, uyg'otish shart emas
+        return True
 
     try:
         logger.info("[Cobalt] HF Space uyg'otilmoqda...")
         async with aiohttp.ClientSession(headers=HEADERS) as session:
-            # GET / — Cobalt v11 serverInfo qaytaradi, v7 redirect qiladi
             async with session.get(
                 api_url.rstrip("/"),
-                timeout=aiohttp.ClientTimeout(total=5),  # 20→5 soniya
+                timeout=aiohttp.ClientTimeout(total=5),
                 allow_redirects=True,
             ) as resp:
                 status = resp.status
                 body = await resp.text()
                 logger.info(f"[Cobalt] HF Space javob: HTTP {status}")
 
-                # Agar HTML qaytarsa — Space uyg'onyapti yoki ishlamayapti
                 if body.strip().startswith("<"):
                     logger.info("[Cobalt] HF Space uyg'onyapti, 5 sekund kutilmoqda...")
-                    await asyncio.sleep(5)  # 8→5 soniya
+                    await asyncio.sleep(5)
 
-                    # Qayta tekshirish
                     async with session.get(
                         api_url.rstrip("/"),
                         timeout=aiohttp.ClientTimeout(total=5),
@@ -303,20 +271,19 @@ async def _wake_hf_space(api_url: str) -> bool:
                     ) as resp2:
                         body2 = await resp2.text()
                         if body2.strip().startswith("<"):
-                            logger.warning("[Cobalt] HF Space hali ham HTML qaytarayapti — API ishlamayapti")
+                            logger.warning("[Cobalt] HF Space hali ham HTML qaytarayapti")
                             return False
                         logger.info("[Cobalt] HF Space API tayyor!")
                         return True
 
-                # JSON javob — Cobalt ishlayapti!
                 if '"version"' in body or '"cobalt"' in body:
                     logger.info("[Cobalt] HF Space tayyor!")
                     return True
 
-                return True  # Noma'lum javob, ammo HTML emas — davom etamiz
+                return True
 
     except asyncio.TimeoutError:
-        logger.warning("[Cobalt] HF Space timeout — ishlamayapti yoki uxlayapti")
+        logger.warning("[Cobalt] HF Space timeout")
         return False
     except Exception as e:
         logger.warning(f"[Cobalt] HF Space uyg'otish xatosi: {e}")
@@ -324,14 +291,7 @@ async def _wake_hf_space(api_url: str) -> bool:
 
 
 async def _try_cobalt(url: str, quality: str = "720", audio_only: bool = False) -> Optional[Dict[str, Any]]:
-    """Cobalt API orqali video yuklab olish.
-
-    Cobalt v11 API:
-    - POST / (root) — Accept: application/json VA Content-Type: application/json SHART
-    - Muvaffaqiyat: {"status":"redirect","url":"..."} yoki {"status":"tunnel","url":"/tunnel?..."}
-    - Xato: {"status":"error","error":{"code":"error.api.fetch.fail","context":{...}}}
-    """
-    # Har safar env dan o'qish (modul yuklanganda emas)
+    """Cobalt API orqali video yuklab olish."""
     api_url = os.getenv("COBALT_API_URL", "")
     api_key = os.getenv("COBALT_API_KEY", "")
 
@@ -339,37 +299,28 @@ async def _try_cobalt(url: str, quality: str = "720", audio_only: bool = False) 
         logger.debug("[Cobalt] COBALT_API_URL o'rnatilmagan")
         return None
 
-    # Cobalt yaqinda ishlamagan bo'lsa, o'tkazib yuborish (5 daqiqa kesh)
     global _cobalt_broken_until
     if time.time() < _cobalt_broken_until:
         logger.debug("[Cobalt] Yaqinda ishlamadi, o'tkazib yuborilmoqda...")
         return None
 
-    # Faqat rasmiy cobalt.tools API uchun kalit talab qilinadi
-    # O'z serverimizda (HF Space) kalit shart emas!
     if not api_key and ("cobalt.tools" in api_url or "api.cobalt.tools" == api_url.rstrip("/")):
         logger.warning("[Cobalt] Rasmiy API uchun COBALT_API_KEY talab qilinadi!")
         return None
 
-    logger.info(f"[Cobalt] {api_url} ga so'rov yuborilmoqda (kalit: {'bor' if api_key else 'yo\'q'})...")
+    logger.info(f"[Cobalt] {api_url} ga so'rov yuborilmoqda...")
 
-    # HF Space bo'lsa, avval uyg'otamiz (faqat birinchi so'rovda)
-    # Space tayyorligini tezkor tekshirish — 5 soniya timeout
     if ".hf.space" in api_url:
         space_ready = await _wake_hf_space(api_url)
         if not space_ready:
-            logger.error("[Cobalt] HF Space ishlamayapti yoki API noto'g'ri o'rnatilgan!")
-            _cobalt_broken_until = time.time() + 300  # 5 daqiqaga o'tkazib yuborish
+            logger.error("[Cobalt] HF Space ishlamayapti!")
+            _cobalt_broken_until = time.time() + 300
             return None
 
-    # Cobalt API endpoint
-    # v11+: POST / (root) — Accept va Content-Type application/json bo'lishi shart!
-    # v7: POST /api/json (endi ishlatilmaydi)
     endpoint = api_url.rstrip('/')
 
-    connector = _get_proxy_connector()
-    proxy = _get_proxy_url() if not connector else None
-
+    # Cobalt SOCKS5 proxy orqali emas, to'g'ridan-to'g'ri ishlaydi
+    # (Cobalt o'zi YouTube ga murojaat qiladi, bizning IPimiz emas)
     cobalt_quality = quality.replace("p", "")
     if audio_only:
         cobalt_quality = "0"
@@ -391,39 +342,27 @@ async def _try_cobalt(url: str, quality: str = "720", audio_only: bool = False) 
         headers["Authorization"] = f"Bearer {api_key}"
 
     try:
-        async with aiohttp.ClientSession(connector=connector) as session:
+        async with aiohttp.ClientSession(headers=HEADERS) as session:
             async with session.post(
                 endpoint,
                 json=payload,
                 headers=headers,
-                proxy=proxy,
-                timeout=aiohttp.ClientTimeout(total=10),  # 30→10 soniya — sekin so'rovlar uchun kutish vaqtini kamaytirish
+                timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
-                # Avval text o'qymiz — logging va HTML tekshirish uchun
-                # Keyin json.loads() bilan parse qilamiz (resp.json() ishlamaydi text dan keyin)
                 body = await resp.text()
-                logger.info(f"[Cobalt] POST {endpoint} → HTTP {resp.status} - {body[:300]}")
+                logger.info(f"[Cobalt] POST {endpoint} -> HTTP {resp.status} - {body[:300]}")
 
-                # HTML javob = noto'g'ri
                 if body.strip().startswith("<"):
-                    logger.error("[Cobalt] HTML javob — API noto'g'ri sozlangan!")
-                    return None
-
-                # 407 = Proxy Authentication Required — proxy ni darhol buzilgan deb belgilash
-                if resp.status == 407:
-                    _mark_proxy_broken("407 Proxy Auth Required (Cobalt)")
+                    logger.error("[Cobalt] HTML javob - API noto'g'ri sozlangan!")
                     return None
 
                 if resp.status == 401:
-                    logger.error("[Cobalt] 401 — API_KEY kerak! HF Space va Render ga qo'shing.")
+                    logger.error("[Cobalt] 401 - API_KEY kerak!")
                     return None
 
-                # Cobalt v11: xatolar ham JSON qaytaradi (HTTP 400)
-                # body ni json.loads bilan parse qilamiz
                 try:
                     data = json.loads(body)
                 except Exception:
-                    # JSON parse bo'lmadi
                     if resp.status != 200:
                         logger.warning(f"[Cobalt] HTTP {resp.status} (JSON emas)")
                     else:
@@ -433,57 +372,39 @@ async def _try_cobalt(url: str, quality: str = "720", audio_only: bool = False) 
                 status = data.get("status", "")
 
                 if status == "error":
-                    # Cobalt v11 xato formati: {"status":"error","error":{"code":"error.api.fetch.fail","context":{"service":"youtube"}}}
-                    # Cobalt v7: {"status":"error","text":"..."} yoki {"status":"error","error":{"code":"..."}}
                     error_text = data.get("text", "")
                     error_obj = data.get("error", {})
 
                     if error_text:
                         logger.warning(f"[Cobalt] Xato: {error_text[:200]}")
-                        if "cookie" in error_text.lower() or "login" in error_text.lower():
-                            logger.error("[Cobalt] YouTube cookie kerak! HF Space ga COOKIE_PATH qo'shing.")
                     elif isinstance(error_obj, dict):
                         error_code = error_obj.get("code", "noma'lum")
                         error_context = error_obj.get("context", {})
                         ctx_str = f" ({error_context})" if error_context else ""
                         logger.warning(f"[Cobalt] Xato kodi: {error_code}{ctx_str}")
-                        # YouTube bilan bog'liq xatolarni aniqroq ko'rsatish
                         if "fetch.fail" in str(error_code) and error_context.get("service") == "youtube":
-                            logger.error("[Cobalt] YouTube yuklab bo'lmadi — yt-session-generator kerak yoki cookie eski!")
-                            # Cobalt 5 daqiqaga o'tkazib yuborish — vaqt tejash
+                            logger.error("[Cobalt] YouTube yuklab bo'lmadi")
                             _cobalt_broken_until = time.time() + 300
-                        elif "cookie" in str(error_code).lower() or "login" in str(error_code).lower():
-                            logger.error("[Cobalt] YouTube cookie kerak! HF Space ga COOKIE_PATH qo'shing.")
                     else:
                         logger.warning(f"[Cobalt] Xato: {str(error_obj)[:200]}")
                     return None
 
-                # Yuklash URL — Cobalt v11 javob formatlari:
-                # redirect: {"status":"redirect","url":"https://..."}
-                # tunnel:   {"status":"tunnel","url":"/tunnel?id=...&sig=..."}
-                # picker:   {"status":"picker","picker":[{"url":"..."},...]}
-                # local-processing: {"status":"local-processing","tunnel":{...},"output":{...}}
                 download_url = None
 
-                # 1. To'g'ridan-to'g'ri URL (redirect yoki tunnel)
                 raw_url = data.get("url")
                 if raw_url:
-                    # Tunnel URL — /tunnel?id=... formatida, to'liq URL yasash
                     if raw_url.startswith("/tunnel"):
                         download_url = f"{api_url.rstrip('/')}{raw_url}"
                     else:
                         download_url = raw_url
 
-                # 2. local-processing (Cobalt v11 audio uchun)
                 if not download_url:
                     tunnel_obj = data.get("tunnel")
                     if isinstance(tunnel_obj, dict):
-                        # Tunnel obyektdan URL olish
                         download_url = tunnel_obj.get("url") or tunnel_obj.get("proxy")
                         if download_url and download_url.startswith("/"):
                             download_url = f"{api_url.rstrip('/')}{download_url}"
 
-                # 3. Picker (bir nechta variant)
                 if not download_url:
                     picker = data.get("picker", [])
                     if picker and isinstance(picker, list):
@@ -504,16 +425,10 @@ async def _try_cobalt(url: str, quality: str = "720", audio_only: bool = False) 
                 else:
                     logger.warning(f"[Cobalt] URL topilmadi: {str(data)[:200]}")
 
-    except aiohttp.ClientConnectorError as e:
-        logger.warning(f"[Cobalt] Ulanish xatosi: {str(e)[:80]}")
-        _mark_proxy_broken("Cobalt connection error")
+    except asyncio.TimeoutError:
+        logger.warning("[Cobalt] Timeout (15s)")
     except Exception as e:
-        err_str = str(e)
-        # 407 Proxy Auth Required — proxy ni darhol buzilgan deb belgilash
-        if "407" in err_str or "Proxy Authentication" in err_str or "ProxyError" in err_str:
-            _mark_proxy_broken("407 Proxy Auth (Cobalt)")
-        else:
-            logger.warning(f"[Cobalt] Xato: {err_str[:100]}")
+        logger.warning(f"[Cobalt] Xato: {str(e)[:100]}")
 
     return None
 
@@ -524,32 +439,17 @@ async def _try_cobalt(url: str, quality: str = "720", audio_only: bool = False) 
 
 async def _try_innertube(video_id: str, quality: str = "720",
                          audio_only: bool = False) -> Optional[Dict[str, Any]]:
-    """YouTube InnerTube API orqali to'g'ridan-to'g'ri video ma'lumot olish.
-
-    Bu usul yt-dlp va tashqi servislarga tayanmaydi.
-    YouTube'ning o'z ichki API siga murojaat qiladi.
-
-    InnerTube API endpoint: https://www.youtube.com/youtubei/v1/player
-    Har xil klient kontekstida (android, ios, web_embed, mweb, web) urinadi.
-    """
+    """YouTube InnerTube API orqali video ma'lumot olish."""
     logger.info(f"[InnerTube] Video ID: {video_id}")
 
-    # Klientlarni sinash tartibi:
-    # - android/ios birinchi — PO Token talab qilmaydi, API key bilan ishlaydi
-    # - web_embed — embed orqali, ba'zan cheklovsiz
-    # - web/mweb — PO Token kerak, aks holda bot detektsiya
-    client_order = ["android", "ios", "web_embed", "mweb", "web"]
+    # Yangi tartib: android, ios, tv, web_embed, mweb, web
+    # android/ios/tv PO Token talab qilmaydi
+    client_order = ["android", "ios", "tv", "web_embed", "mweb", "web"]
 
     po_token = os.getenv("PO_TOKEN", "")
-    has_bot_detection = False  # Bot detektsiya bo'lsa, keyingi klientlarni o'tkazib yuborish
+    has_bot_detection = False
 
     for client_key in client_order:
-        # Agar proxy buzilgan bo'lsa — keyingi klientlarni sinash behuda (hammasi proxy orqali boradi)
-        if not _is_proxy_available() and YOUTUBE_PROXY:
-            logger.info(f"[InnerTube] {client_key}: O'tkazib yuborildi (proxy buzilgan — 407)")
-            continue
-
-        # Agar bot detektsiya bo'lsa va PO Token yo'q bo'lsa, web/mweb klientlarni o'tkazib yuborish
         if has_bot_detection and not po_token and client_key in ("web", "mweb", "web_embed"):
             logger.info(f"[InnerTube] {client_key}: O'tkazib yuborildi (bot detektsiya + PO_TOKEN yo'q)")
             continue
@@ -562,16 +462,13 @@ async def _try_innertube(video_id: str, quality: str = "720",
         try:
             result = await _innertube_player_request(video_id, client_key, client_ctx, po_token)
             if result is None:
-                # So'rovning o'zi muvaffaqiyatsiz (timeout, HTTP xato, ulanish xatosi)
-                logger.warning(f"[InnerTube] {client_key}: So'rov muvaffaqiyatsiz (timeout yoki ulanish xatosi)")
+                logger.warning(f"[InnerTube] {client_key}: So'rov muvaffaqiyatsiz")
                 continue
 
-            # Natijani tekshirish - playable bo'lishi kerak
             playability = result.get("playabilityStatus", {})
             status = playability.get("status", "")
 
             if status == "OK":
-                # Video ma'lumotlari va formatlar bor
                 streaming_data = result.get("streamingData", {})
                 formats = streaming_data.get("formats", [])
                 adaptive_formats = streaming_data.get("adaptiveFormats", [])
@@ -601,10 +498,8 @@ async def _try_innertube(video_id: str, quality: str = "720",
                     f"[InnerTube] {client_key}: LOGIN_REQUIRED - "
                     f"{reason} {' '.join(messages)[:100]}"
                 )
-                # Bot detektsiya belgilash
                 if "bot" in reason.lower() or "sign in" in reason.lower():
                     has_bot_detection = True
-                # PO Token yo'q bo'lsa, boshqa klientlar ham xuddi shu xatoni beradi — fast-fail
                 if not po_token:
                     logger.info(f"[InnerTube] PO_TOKEN yo'q, keyingi klientga o'tilmoqda...")
                 continue
@@ -616,9 +511,8 @@ async def _try_innertube(video_id: str, quality: str = "720",
 
             elif status == "ERROR":
                 reason = playability.get("reason", "")
-                # "YouTube is no longer supported" = klient versiyasi eskirgan
                 if "no longer supported" in reason.lower():
-                    logger.warning(f"[InnerTube] {client_key}: KLIENT ESKIRGAN — {reason}")
+                    logger.warning(f"[InnerTube] {client_key}: KLIENT ESKIRGAN - {reason}")
                 else:
                     logger.warning(f"[InnerTube] {client_key}: ERROR - {reason}")
                 continue
@@ -643,14 +537,11 @@ async def _innertube_player_request(video_id: str, client_key: str,
                                      client_ctx: Dict, po_token: str = "") -> Optional[Dict]:
     """YouTube InnerTube player API ga so'rov yuborish.
 
-    Har xil klient uchun kerakli parametrlar:
-    - android/ios: API key bilan ishlaydi, PO Token kerak emas
-    - web/mweb: PO Token kerak (bot detektsiya uchun)
-    - web_embed: thirdPartyEmbedUrl kerak, ba'zan cheklovsiz ishlaydi
+    YANGILANGAN: _get_proxy_url() hamisha None qaytaradi,
+    SOCKS5 faqat connector orqali ishlaydi.
     """
     import hashlib
 
-    # API key ni kontekstdan olish yoki default
     api_key = client_ctx.get("apiKey", "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8")
 
     api_url = "https://www.youtube.com/youtubei/v1/player"
@@ -659,14 +550,13 @@ async def _innertube_player_request(video_id: str, client_key: str,
         "prettyPrint": "false",
     }
 
-    # Klient kontekstini nusxalash (apiKey ni olib tashlash)
     client_info = {k: v for k, v in client_ctx.items() if k != "apiKey"}
 
     # PO Token qo'shish (web, mweb, web_embed klientlari uchun)
     if po_token and client_key in ("web", "mweb", "web_embed"):
         client_info["poToken"] = po_token
 
-    # VISITOR_DATA qo'shish (muhim — YouTube visitor identifikatsiyasi)
+    # VISITOR_DATA qo'shish
     visitor_data = os.getenv("VISITOR_DATA", "")
     if visitor_data and client_key in ("web", "mweb", "web_embed"):
         client_info["visitorData"] = visitor_data
@@ -697,11 +587,13 @@ async def _innertube_player_request(video_id: str, client_key: str,
         "racyCheckOk": True,
     }
 
-    # Android/ios uchun User-Agent farq qiladi
+    # User-Agent
     if client_key == "android":
         user_agent = "com.google.android.youtube/20.29.37 (Linux; U; Android 15)"
     elif client_key == "ios":
         user_agent = "com.google.ios.youtube/20.29.3 (iPhone; U; CPU iOS 19_0 like Mac OS X)"
+    elif client_key == "tv":
+        user_agent = "Mozilla/5.0 (Chromecast; Linux) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 CrKey/1.56.500000"
     else:
         user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
@@ -712,19 +604,20 @@ async def _innertube_player_request(video_id: str, client_key: str,
         "Referer": f"https://www.youtube.com/watch?v={video_id}",
     }
 
-    # Android/ios xususiy headerlar
     if client_key == "android":
         headers["X-YouTube-Client-Name"] = "3"
         headers["X-YouTube-Client-Version"] = "20.29.37"
     elif client_key == "ios":
         headers["X-YouTube-Client-Name"] = "5"
         headers["X-YouTube-Client-Version"] = "20.29.3"
+    elif client_key == "tv":
+        headers["X-YouTube-Client-Name"] = "7"
+        headers["X-YouTube-Client-Version"] = "7.20260610.00.00"
 
     # Cookie header qo'shish
     cookie_parts = []
     if sapisid:
         cookie_parts.append(f"SAPISID={sapisid}")
-        # SAPISIDHASH yaratish
         timestamp = str(int(time.time()))
         hash_input = f"{timestamp} {sapisid} https://www.youtube.com"
         sapisidhash = hashlib.sha1(hash_input.encode()).hexdigest()
@@ -733,16 +626,15 @@ async def _innertube_player_request(video_id: str, client_key: str,
     if cookie_parts:
         headers["Cookie"] = "; ".join(cookie_parts)
 
-    # Faqat 1 marta urinish — proxy bo'lsa proxy bilan, aks holda proxiesz
+    # Proxy: SOCKS5 connector yoki proxysz
     use_proxy = _is_proxy_available()
     connector = _get_proxy_connector() if use_proxy else None
-    proxy = _get_proxy_url() if use_proxy and not connector else None
+    proxy = None  # SOCKS5 connector orqali ishlaydi
 
     if use_proxy:
-        proxy_display = YOUTUBE_PROXY.split('@')[-1] if '@' in YOUTUBE_PROXY else YOUTUBE_PROXY[:30]
-        logger.info(f"[InnerTube] {client_key}: Proxy ishlatilmoqda ({proxy_display})")
+        logger.info(f"[InnerTube] {client_key}: SOCKS5 proxy ishlatilmoqda")
     else:
-        logger.info(f"[InnerTube] {client_key}: Proxiesz")
+        logger.info(f"[InnerTube] {client_key}: Proxysz")
 
     try:
         async with aiohttp.ClientSession(connector=connector) as session:
@@ -752,16 +644,14 @@ async def _innertube_player_request(video_id: str, client_key: str,
                 json=payload,
                 headers=headers,
                 proxy=proxy,
-                timeout=aiohttp.ClientTimeout(total=8),  # 8 soniya — tezroq
+                timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
                 if resp.status != 200:
-                    # 407 = Proxy Authentication Required — proxy ni darhol buzilgan deb belgilash
-                    if resp.status == 407 and use_proxy:
-                        _mark_proxy_broken("407 Proxy Auth Required")
-                    # 403 ham proxy muammosi bo'lishi mumkin
-                    elif resp.status in (403, 429) and use_proxy:
-                        pass  # Proxy ni buzilgan deb belgilamaslik - bu YouTube cheklovi
-                    logger.warning(f"[InnerTube] {client_key}: HTTP {resp.status}")
+                    if resp.status == 403:
+                        # 403 — YouTube bot deb o'ylayapti, boshqa klientga o'tish
+                        logger.warning(f"[InnerTube] {client_key}: HTTP 403 (bot detection)")
+                    else:
+                        logger.warning(f"[InnerTube] {client_key}: HTTP {resp.status}")
                     return None
 
                 data = await resp.json()
@@ -773,12 +663,10 @@ async def _innertube_player_request(video_id: str, client_key: str,
         logger.warning(f"[InnerTube] {client_key}: Ulanish xatosi")
         return None
     except asyncio.TimeoutError:
-        logger.warning(f"[InnerTube] {client_key}: Timeout (8s)")
+        logger.warning(f"[InnerTube] {client_key}: Timeout (10s)")
         return None
     except Exception as e:
         err_str = str(e)
-        # 407 Proxy Auth Required — proxy ni darhol buzilgan deb belgilash
-        # aiohttp HTTPS orqali proxy dan 407 ni exception sifatida qaytaradi
         if "407" in err_str or "Proxy Authentication" in err_str or "ProxyError" in err_str:
             if use_proxy:
                 _mark_proxy_broken(f"407 Proxy Auth (InnerTube {client_key})")
@@ -789,34 +677,25 @@ async def _innertube_player_request(video_id: str, client_key: str,
 
 def _extract_innertube_download(data: Dict, quality: str = "720",
                                  audio_only: bool = False) -> Tuple[Optional[str], str, Optional[Dict]]:
-    """InnerTube natijasidan eng yaxshi yuklab olish URL ini topish.
-
-    Returns:
-        (download_url, file_ext, info_dict) yoki (None, "", None)
-    """
+    """InnerTube natijasidan eng yaxshi yuklab olish URL ini topish."""
     streaming_data = data.get("streamingData", {})
     video_details = data.get("videoDetails", {})
 
-    formats = streaming_data.get("formats", [])  # Combined (video+audio)
-    adaptive_formats = streaming_data.get("adaptiveFormats", [])  # Separated
+    formats = streaming_data.get("formats", [])
+    adaptive_formats = streaming_data.get("adaptiveFormats", [])
 
     if audio_only:
-        # Eng yaxshi audio formatni topish
         audio_fmts = [f for f in adaptive_formats if f.get("mimeType", "").startswith("audio/")]
         if not audio_fmts:
-            # Combined formatlardan foydalanish
             audio_fmts = formats
-
         if not audio_fmts:
             return None, "", None
 
-        # Bitrate bo'yicha saralash
         audio_fmts.sort(key=lambda f: int(f.get("bitrate", 0)), reverse=True)
         best = audio_fmts[0]
 
         url = best.get("url")
         if not url:
-            # Cipher/signature URL ni tekshirish
             cipher = best.get("cipher") or best.get("signatureCipher", "")
             if cipher:
                 url = _decrypt_cipher(cipher)
@@ -830,10 +709,9 @@ def _extract_innertube_download(data: Dict, quality: str = "720",
     # Video yuklash
     target_height = int(quality.replace("p", ""))
 
-    # Combined formatlar (video+audio) - eng yaxshi tanlov
+    # Combined formatlar
     combined = [f for f in formats if f.get("url") or f.get("cipher") or f.get("signatureCipher")]
     if combined:
-        # Target height ga yaqin combined formatni topish
         best_combined = _find_closest_format(combined, target_height)
         if best_combined:
             url = best_combined.get("url")
@@ -845,7 +723,7 @@ def _extract_innertube_download(data: Dict, quality: str = "720",
                 info = _innertube_to_info(video_details, best_combined, audio_only=False)
                 return url, "mp4", info
 
-    # Adaptive formatlardan eng yaxshi videoni topish
+    # Adaptive formatlar
     video_fmts = [f for f in adaptive_formats if f.get("mimeType", "").startswith("video/")]
     if video_fmts:
         best_video = _find_closest_format(video_fmts, target_height)
@@ -870,7 +748,6 @@ def _find_closest_format(formats: List[Dict], target_height: int) -> Optional[Di
     for fmt in formats:
         height = fmt.get("height")
         if not height:
-            # Quality label dan olish
             quality = fmt.get("qualityLabel", "")
             if "p" in quality:
                 try:
@@ -885,7 +762,6 @@ def _find_closest_format(formats: List[Dict], target_height: int) -> Optional[Di
             best_diff = diff
             best = fmt
         elif diff == best_diff and best:
-            # Bir xil height da kattaroq bitrate tanlash
             if int(fmt.get("bitrate", 0)) > int(best.get("bitrate", 0)):
                 best = fmt
 
@@ -893,27 +769,16 @@ def _find_closest_format(formats: List[Dict], target_height: int) -> Optional[Di
 
 
 def _decrypt_cipher(cipher_text: str) -> Optional[str]:
-    """YouTube cipher/signatureCipher dan URL ajratib olish.
-
-    Eslatma: To'liq decrypt qilish uchun YouTube JavaScript player kodini
-    tahlil qilish kerak. Bu yerda faqat URL ni ajratib olamiz.
-    Agar signature qismlari bo'lsa, ularni qayta ishlash mumkin emas
-    (player kodini talab qiladi).
-
-    Amaliy yechim: Invidious orqali proxy qilish.
-    """
+    """YouTube cipher/signatureCipher dan URL ajratib olish."""
     from urllib.parse import parse_qs as _parse_qs
 
     try:
         params = _parse_qs(cipher_text)
         url = params.get("url", [None])[0]
         if url:
-            # s (signature) parametri bo'lsa, uni qo'shish
             s = params.get("s", [None])[0]
             sp = params.get("sp", ["signature"])[0]
             if s:
-                # Signature bor - to'liq decrypt qilib bo'lmaydi
-                # Lekin ba'zi hollarda ishlaydi
                 import urllib.parse
                 url = f"{url}&{sp}={urllib.parse.quote(s)}"
             return url
@@ -950,26 +815,24 @@ def _innertube_to_info(video_details: Dict, fmt: Dict,
 
 
 # ============================================================
-# INVIDIOUS API - avval proxiesz, keyin proxy bilan
+# INVIDIOUS API
 # ============================================================
 
 async def _try_invidious(video_id: str, fast_only: bool = False) -> Optional[Dict[str, Any]]:
     """Invidious API orqali video ma'lumotlarini olish.
 
-    MUHIM: Invidious - bu YouTube alternative frontend.
-    U YouTube emas, shuning uchun datacenter IP dan ham ishlashi kerak.
-    Avval PROXIESZ sinaymiz (tezroq), keyin proxy bilan.
+    YANGILANGAN: Invidious proxy emas — YouTube ga o'zi murojaat qiladi.
+    Shuning uchun biz PROXY ishlatmaymiz, to'g'ridan-to'g'ri so'rov yuboramiz.
     """
     instances = _FAST_INVIDIOUS if fast_only else INVIDIOUS_INSTANCES
 
-    # 1-urinish: Proxiesz (tezroq, Invidious o'zi proxy emas)
     for instance in instances:
         try:
             async with aiohttp.ClientSession(headers=HEADERS) as session:
                 url = f"{instance}/api/v1/videos/{video_id}"
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
                     if resp.status != 200:
-                        logger.debug(f"[Invidious] {instance}: HTTP {resp.status} (proxiesz)")
+                        logger.debug(f"[Invidious] {instance}: HTTP {resp.status}")
                         continue
 
                     data = await resp.json()
@@ -981,7 +844,7 @@ async def _try_invidious(video_id: str, fast_only: bool = False) -> Optional[Dic
                         continue
 
                     logger.info(
-                        f"[Invidious] {instance}: MUVOFAQIYATLI (proxiesz) - "
+                        f"[Invidious] {instance}: MUVOFAQIYATLI - "
                         f"Video: {len(video_formats)}, Audio: {len(audio_formats)}"
                     )
                     return {
@@ -995,66 +858,27 @@ async def _try_invidious(video_id: str, fast_only: bool = False) -> Optional[Dic
             logger.debug(f"[Invidious] {instance}: {str(e)[:60]}")
             continue
 
-    # 2-urinish: Proxy bilan (faqat proxy mavjud bo'lsa)
-    if _is_proxy_available():
-        connector = _get_proxy_connector()
-        proxy = _get_proxy_url() if not connector else None
-
-        for instance in instances[:3]:  # Faqat 3 tasi bilan sinash
-            try:
-                async with aiohttp.ClientSession(connector=connector, headers=HEADERS) as session:
-                    url = f"{instance}/api/v1/videos/{video_id}"
-                    async with session.get(url, proxy=proxy, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                        if resp.status != 200:
-                            if resp.status == 407:
-                                _mark_proxy_broken("407 Proxy Auth Required (Invidious)")
-                                break
-                            continue
-
-                        data = await resp.json()
-                        formats = data.get("formatStreams", []) + data.get("adaptiveFormats", [])
-                        if formats:
-                            logger.info(f"[Invidious] {instance}: MUVOFAQIYATLI (proxy bilan)")
-                            return {
-                                "source": "invidious",
-                                "instance": instance,
-                                "data": data,
-                                "video_id": video_id,
-                            }
-
-            except aiohttp.ClientConnectorError:
-                _mark_proxy_broken("Invidious connection error")
-                break
-            except Exception as e:
-                # 407 Proxy Auth Required — exception ko'rinishida
-                if "407" in str(e) or "Proxy Authentication" in str(e) or "ProxyError" in str(e):
-                    _mark_proxy_broken("407 Proxy Auth (Invidious)")
-                    break
-                continue
-
     return None
 
 
 # ============================================================
-# PIPED API - avval proxiesz, keyin proxy bilan
+# PIPED API
 # ============================================================
 
 async def _try_piped(video_id: str, fast_only: bool = False) -> Optional[Dict[str, Any]]:
     """Piped API orqali video ma'lumotlarini olish.
 
-    MUHIM: Piped ham YouTube alternative frontend.
-    Avval PROXIESZ sinaymiz, keyin proxy bilan.
+    YANGILANGAN: Piped ham proxy emas — to'g'ridan-to'g'ri so'rov.
     """
     instances = _FAST_PIPED if fast_only else PIPED_INSTANCES
 
-    # 1-urinish: Proxiesz
     for instance in instances:
         try:
             async with aiohttp.ClientSession(headers=HEADERS) as session:
                 url = f"{instance}/streams/{video_id}"
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
                     if resp.status != 200:
-                        logger.debug(f"[Piped] {instance}: HTTP {resp.status} (proxiesz)")
+                        logger.debug(f"[Piped] {instance}: HTTP {resp.status}")
                         continue
 
                     data = await resp.json()
@@ -1065,7 +889,7 @@ async def _try_piped(video_id: str, fast_only: bool = False) -> Optional[Dict[st
                         continue
 
                     logger.info(
-                        f"[Piped] {instance}: MUVOFAQIYATLI (proxiesz) - "
+                        f"[Piped] {instance}: MUVOFAQIYATLI - "
                         f"Video: {len(video_streams)}, Audio: {len(audio_streams)}"
                     )
                     return {
@@ -1079,80 +903,36 @@ async def _try_piped(video_id: str, fast_only: bool = False) -> Optional[Dict[st
             logger.debug(f"[Piped] {instance}: {str(e)[:60]}")
             continue
 
-    # 2-urinish: Proxy bilan
-    if _is_proxy_available():
-        connector = _get_proxy_connector()
-        proxy = _get_proxy_url() if not connector else None
-
-        for instance in instances[:2]:
-            try:
-                async with aiohttp.ClientSession(connector=connector, headers=HEADERS) as session:
-                    url = f"{instance}/streams/{video_id}"
-                    async with session.get(url, proxy=proxy, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                        if resp.status != 200:
-                            if resp.status == 407:
-                                _mark_proxy_broken("407 Proxy Auth Required (Piped)")
-                                break
-                            continue
-
-                        data = await resp.json()
-                        video_streams = data.get("videoStreams", [])
-                        audio_streams = data.get("audioStreams", [])
-
-                        if video_streams or audio_streams:
-                            logger.info(f"[Piped] {instance}: MUVOFAQIYATLI (proxy bilan)")
-                            return {
-                                "source": "piped",
-                                "instance": instance,
-                                "data": data,
-                                "video_id": video_id,
-                            }
-
-            except aiohttp.ClientConnectorError:
-                _mark_proxy_broken("Piped connection error")
-                break
-            except Exception as e:
-                # 407 Proxy Auth Required — exception ko'rinishida
-                if "407" in str(e) or "Proxy Authentication" in str(e) or "ProxyError" in str(e):
-                    _mark_proxy_broken("407 Proxy Auth (Piped)")
-                    break
-                continue
-
     return None
 
 
 # ============================================================
-# INVIDIOUS PROXY DOWNLOAD - Invidious orqali video yuklash
+# INVIDIOUS PROXY DOWNLOAD
 # ============================================================
 
 async def _try_invidious_proxy_download(video_id: str, quality: str = "720",
                                          audio_only: bool = False) -> Optional[Tuple[str, Dict[str, Any]]]:
     """Invidious orqali video yuklash — Invidious o'zi proxy bo'lib ishlaydi.
 
-    Invidious /latest_version endpoint i orqali to'g'ridan-to'g'ri yuklab olish.
-    Invidious proksi sifatida ishlaydi — YouTube CDN ga o'z IP sidan murojaat qiladi.
-    Bu datacenter IP da ishlashi kerak, chunki YouTube Invidious server IP sini ko'radi.
+    YANGILANGAN: Proxy ishlatmaymiz (Invidious o'zi YouTube ga murojaat qiladi).
     """
-    instances = _FAST_INVIDIOUS[:3]  # Faqat 3 ta eng tez instance
+    instances = _FAST_INVIDIOUS[:4]
 
     target_height = int(quality.replace("p", "")) if not audio_only else 0
 
     for instance in instances:
         try:
-            # Avval video ma'lumotlarini olish
             async with aiohttp.ClientSession(headers=HEADERS) as session:
                 api_url = f"{instance}/api/v1/videos/{video_id}"
-                async with session.get(api_url, timeout=aiohttp.ClientTimeout(total=6)) as resp:
+                async with session.get(api_url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
                     if resp.status != 200:
                         continue
 
                     data = await resp.json()
 
                     if audio_only:
-                        # Audio formatni topish
                         for fmt in data.get("adaptiveFormats", []):
                             if fmt.get("type", "").startswith("audio") and fmt.get("url"):
-                                # Invidious local proxy URL
                                 download_url = fmt["url"]
                                 if not download_url.startswith("http"):
                                     download_url = f"{instance}{download_url}"
@@ -1207,10 +987,10 @@ async def get_youtube_info_via_api(url: str, skip_cobalt: bool = False,
     """YouTube video ma'lumotlarini API orqali olish.
 
     STRATEGIYA:
-    1. Cobalt API - o'z serverimiz, eng ishonchli (agar skip_cobalt=False)
-    2. InnerTube API - YouTube'ning ichki API si (agar skip_innertube=False)
-    3. Invidious - tezkor, keyin to'liq
-    4. Piped - tezkor, keyin to'liq
+    1. Cobalt API (agar skip_cobalt=False)
+    2. InnerTube API (agar skip_innertube=False)
+    3. Invidious (tezkor, keyin to'liq)
+    4. Piped (tezkor, keyin to'liq)
     """
     video_id = _extract_video_id(url)
     if not video_id:
@@ -1219,12 +999,11 @@ async def get_youtube_info_via_api(url: str, skip_cobalt: bool = False,
 
     logger.info(f"[API] Video ID: {video_id}")
 
-    # === 1-USUL: Cobalt API (o'z serverimiz) ===
+    # === 1-USUL: Cobalt API ===
     if not skip_cobalt:
         cobalt_result = await _try_cobalt(url, "720", False)
         if cobalt_result and cobalt_result.get("download_url"):
             logger.info("[API] Cobalt orqali video mavjudligi tasdiqlandi!")
-            # Cobalt to'liq info bermaydi, lekin mavjudligini tasdiqlaydi
             return {
                 "source": "cobalt",
                 "data": {
@@ -1237,7 +1016,7 @@ async def get_youtube_info_via_api(url: str, skip_cobalt: bool = False,
         else:
             logger.info("[API] Cobalt ishlamadi, keyingi usulga o'tilmoqda...")
 
-    # === 2-USUL: InnerTube API (YouTube ichki API) ===
+    # === 2-USUL: InnerTube API ===
     if not skip_innertube:
         innertube_result = await _try_innertube(video_id, "720", False)
         if innertube_result:
@@ -1274,19 +1053,16 @@ async def download_youtube_via_api(url: str, quality: str = "720",
                                     skip_innertube: bool = False) -> Optional[Tuple[str, Dict[str, Any]]]:
     """YouTube videosini API orqali yuklab olish.
 
-    STRATEGIYA (yangilangan — tezroq):
-    1. Cobalt API - o'z serverimiz (agar skip_cobalt=False)
-    2. InnerTube API - YouTube ichki API (agar skip_innertube=False)
-    3. Invidious proxy download - Invidious orqali proksi yuklash
+    STRATEGIYA:
+    1. Cobalt API (agar skip_cobalt=False)
+    2. InnerTube API (agar skip_innertube=False)
+    3. Invidious proxy download
     4. Invidious/Piped API orqali yuklash
-
-    MUHIM: Har bir usul uchun timeout qisqa — 8-10 soniya.
-    Agar bitta usul ishlamasa, tezda keyingisiga o'tamiz.
     """
     video_id = _extract_video_id(url)
     start_time = time.time()
 
-    # 1: COBALT (faqat skip bo'lmasa)
+    # 1: COBALT
     if not skip_cobalt:
         logger.info("[API] 1-usul: Cobalt orqali yuklanmoqda...")
         cobalt_result = await _try_cobalt(url, quality, audio_only)
@@ -1305,7 +1081,7 @@ async def download_youtube_via_api(url: str, quality: str = "720",
         else:
             logger.info(f"[API] Cobalt ishlamadi ({time.time()-start_time:.1f}s), keyingi usul...")
 
-    # 2: INNERTUBE (faqat skip bo'lmasa)
+    # 2: INNERTUBE
     if not skip_innertube:
         logger.info("[API] 2-usul: InnerTube orqali yuklanmoqda...")
         innertube_result = await _try_innertube(video_id, quality, audio_only)
@@ -1326,9 +1102,9 @@ async def download_youtube_via_api(url: str, quality: str = "720",
         else:
             logger.info(f"[API] InnerTube ishlamadi ({time.time()-start_time:.1f}s), keyingi usul...")
 
-    # 3: INVIDIOUS PROXY DOWNLOAD — tezkor 2 ta instance bilan (qisqartirilgan)
+    # 3: INVIDIOUS PROXY DOWNLOAD
     elapsed = time.time() - start_time
-    if elapsed < 25:  # Agar hali vaqt bo'lsa
+    if elapsed < 25:
         logger.info("[API] 3-usul: Invidious proxy orqali yuklanmoqda...")
         inv_proxy_result = await _try_invidious_proxy_download(video_id, quality, audio_only)
         if inv_proxy_result:
@@ -1337,7 +1113,7 @@ async def download_youtube_via_api(url: str, quality: str = "720",
     else:
         logger.info("[API] 3-usul o'tkazib yuborildi (vaqt tugadi)")
 
-    # 4: INVIDIOUS API — tezkor instancelar bilan
+    # 4: INVIDIOUS API
     elapsed = time.time() - start_time
     if elapsed < 25:
         logger.info("[API] 4-usul: Invidious orqali yuklanmoqda...")
@@ -1353,7 +1129,7 @@ async def download_youtube_via_api(url: str, quality: str = "720",
     else:
         logger.info("[API] 4-usul o'tkazib yuborildi (vaqt tugadi)")
 
-    # 5: PIPED — tezkor instancelar bilan
+    # 5: PIPED
     elapsed = time.time() - start_time
     if elapsed < 25:
         logger.info("[API] 5-usul: Piped orqali yuklanmoqda...")
@@ -1376,7 +1152,12 @@ async def download_youtube_via_api(url: str, quality: str = "720",
 
 async def _download_from_url(url: str, video_id: str, audio_only: bool,
                               file_ext: str = None) -> Optional[str]:
-    """To'g'ridan-to'g'ri URL dan fayl yuklab olish."""
+    """To'g'ridan-to'g'ri URL dan fayl yuklab olish.
+
+    YANGILANGAN: SOCKS5 proxy faqat connector orqali.
+    Invidious/Piped URL lari uchun proxy kerak emas (ular o'z proksilari orqali xizmat qiladi).
+    Faqat InnerTube dan olingan YouTube CDN URL lari uchun SOCKS5 proxy kerak bo'lishi mumkin.
+    """
     output_path = tempfile.mkdtemp()
 
     if not file_ext:
@@ -1391,72 +1172,111 @@ async def _download_from_url(url: str, video_id: str, audio_only: bool,
         from app.config import config as app_config
         max_size = app_config.download.max_file_size_mb * 1024 * 1024
 
-        # Agar proxy mavjud bo'lsa, avval proxy bilan urinish (YouTube fayllari datacenter IP dan yuklamaydi)
-        # Agar proxy yo'q bo'lsa, proxiesz urinish
-        proxy_available = _is_proxy_available()
-        proxy_order = [True, False] if proxy_available else [False]
+        # SOCKS5 proxy: faqat youtube.com/googlevideo.com URL lari uchun
+        is_youtube_cdn = "googlevideo.com" in url or "youtube.com" in url
+        use_proxy = _is_proxy_available() and is_youtube_cdn
 
-        for use_proxy in proxy_order:
-            if use_proxy and not proxy_available:
-                continue
+        connector = _get_proxy_connector() if use_proxy else None
+        proxy = None  # SOCKS5 connector orqali
 
-            connector = _get_proxy_connector() if use_proxy else None
-            proxy = _get_proxy_url() if use_proxy and not connector else None
+        try:
+            async with aiohttp.ClientSession(connector=connector, headers=HEADERS) as session:
+                async with session.get(url, proxy=proxy, timeout=aiohttp.ClientTimeout(total=120)) as resp:
+                    if resp.status != 200:
+                        if use_proxy:
+                            _mark_proxy_broken(f"Download HTTP {resp.status}")
+                            # Qayta urinish: proxysz
+                            logger.info(f"[API] Proxy bilan yuklab bo'lmadi (HTTP {resp.status}), proxysz urinilmoqda...")
+                            return await _download_from_url_no_proxy(url, video_id, audio_only, file_ext, max_size, file_path, output_path)
+                        logger.error(f"[API] Yuklash HTTP xatosi: {resp.status}")
+                        return None
 
-            try:
-                async with aiohttp.ClientSession(connector=connector, headers=HEADERS) as session:
-                    async with session.get(url, proxy=proxy, timeout=aiohttp.ClientTimeout(total=120)) as resp:
-                        if resp.status != 200:
-                            # 407 = Proxy Auth Required — proxy ni buzilgan deb belgilash
-                            if resp.status == 407 and use_proxy:
-                                _mark_proxy_broken("407 Proxy Auth Required (download)")
-                                continue
-                            if use_proxy:
-                                continue
-                            logger.error(f"[API] Yuklash HTTP xatosi: {resp.status}")
-                            return None
+                    total_size = 0
+                    with open(file_path, "wb") as f:
+                        async for chunk in resp.content.iter_chunked(65536):
+                            total_size += len(chunk)
+                            if total_size > max_size:
+                                logger.error(f"[API] Fayl juda katta: {total_size / 1024 / 1024:.1f}MB")
+                                try:
+                                    os.remove(file_path)
+                                except OSError:
+                                    pass
+                                return None
+                            f.write(chunk)
 
-                        total_size = 0
-                        with open(file_path, "wb") as f:
-                            async for chunk in resp.content.iter_chunked(65536):  # 64KB — tezroq
-                                total_size += len(chunk)
-                                if total_size > max_size:
-                                    logger.error(f"[API] Fayl juda katta: {total_size / 1024 / 1024:.1f}MB")
-                                    try:
-                                        os.remove(file_path)
-                                    except OSError:
-                                        pass
-                                    return None
-                                f.write(chunk)
+                    if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+                        logger.error("[API] Yuklangan fayl bo'sh")
+                        return None
 
-                        if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
-                            logger.error("[API] Yuklangan fayl bo'sh")
-                            return None
+                    file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+                    logger.info(f"[API] Yuklash MUVOFAQIYATLI: {file_size_mb:.1f}MB")
+                    return file_path
 
-                        file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-                        logger.info(f"[API] Yuklash MUVOFAQIYATLI: {file_size_mb:.1f}MB")
-                        return file_path
-
-            except aiohttp.ClientConnectorError:
-                if use_proxy:
-                    _mark_proxy_broken("Download connection error")
-                    continue
-                logger.error("[API] Ulanish xatosi")
-                return None
-            except Exception as e:
-                err_str = str(e)
-                # 407 Proxy Auth Required
-                if "407" in err_str or "Proxy Authentication" in err_str or "ProxyError" in err_str:
-                    if use_proxy:
-                        _mark_proxy_broken("407 Proxy Auth (download)")
-                        continue
-                if use_proxy:
-                    continue
-                logger.error(f"[API] Yuklash xatosi: {e}")
-                return None
+        except aiohttp.ClientConnectorError:
+            if use_proxy:
+                _mark_proxy_broken("Download connection error")
+                logger.info("[API] Proxy bilan ulanib bo'lmadi, proxysz urinilmoqda...")
+                return await _download_from_url_no_proxy(url, video_id, audio_only, file_ext, max_size, file_path, output_path)
+            logger.error("[API] Ulanish xatosi")
+            return None
+        except Exception as e:
+            err_str = str(e)
+            if use_proxy and ("407" in err_str or "Proxy Authentication" in err_str or "ProxyError" in err_str):
+                _mark_proxy_broken(f"407 Proxy Auth (download)")
+                logger.info("[API] Proxy xatosi, proxysz urinilmoqda...")
+                return await _download_from_url_no_proxy(url, video_id, audio_only, file_ext, max_size, file_path, output_path)
+            if use_proxy:
+                logger.info("[API] Proxy bilan yuklab bo'lmadi, proxysz urinilmoqda...")
+                return await _download_from_url_no_proxy(url, video_id, audio_only, file_ext, max_size, file_path, output_path)
+            logger.error(f"[API] Yuklash xatosi: {e}")
+            return None
 
     except Exception as e:
         logger.error(f"[API] Yuklash xatosi: {e}")
+
+    return None
+
+
+async def _download_from_url_no_proxy(url: str, video_id: str, audio_only: bool,
+                                       file_ext: str, max_size: int,
+                                       file_path: str, output_path: str) -> Optional[str]:
+    """Proxysz URL dan fayl yuklab olish (fallback)."""
+    try:
+        async with aiohttp.ClientSession(headers=HEADERS) as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=120)) as resp:
+                if resp.status != 200:
+                    logger.error(f"[API] Proxysz yuklash HTTP xatosi: {resp.status}")
+                    return None
+
+                # Faylni qayta yozish uchun tozalash
+                try:
+                    os.remove(file_path)
+                except OSError:
+                    pass
+
+                total_size = 0
+                with open(file_path, "wb") as f:
+                    async for chunk in resp.content.iter_chunked(65536):
+                        total_size += len(chunk)
+                        if total_size > max_size:
+                            logger.error(f"[API] Fayl juda katta: {total_size / 1024 / 1024:.1f}MB")
+                            try:
+                                os.remove(file_path)
+                            except OSError:
+                                pass
+                            return None
+                        f.write(chunk)
+
+                if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+                    logger.error("[API] Yuklangan fayl bo'sh (proxysz)")
+                    return None
+
+                file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+                logger.info(f"[API] Proxysz yuklash MUVOFAQIYATLI: {file_size_mb:.1f}MB")
+                return file_path
+
+    except Exception as e:
+        logger.error(f"[API] Proxysz yuklash xatosi: {e}")
 
     return None
 
@@ -1569,14 +1389,12 @@ def convert_api_info_to_ytdlp(api_result: Dict[str, Any]) -> Dict[str, Any]:
     video_id = api_result["video_id"]
 
     if source == "cobalt":
-        # Cobalt to'liq info bermaydi, basic info yaratamiz
         return _make_basic_info(
             f"https://www.youtube.com/watch?v={video_id}",
             video_id,
             False
         )
     elif source == "innertube":
-        # InnerTube ma'lumotlarini konvertatsiya qilish
         video_details = data.get("videoDetails", {})
         return {
             "id": video_id,
