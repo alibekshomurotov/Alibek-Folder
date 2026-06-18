@@ -113,7 +113,6 @@ def format_video_info(info: dict, platform: str) -> str:
     duration = info.get("duration")
     if duration:
         text += f"⏱ Davomiylik: {format_duration(int(float(duration)))}\n"
-
     # Views
     views = info.get("view_count")
     if views:

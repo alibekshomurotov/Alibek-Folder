@@ -20,7 +20,15 @@ async def cancel_action(callback: CallbackQuery, state: FSMContext):
     if current_state:
         await state.clear()
 
-    await callback.message.edit_text(
-        f"❌ Amal bekor qilindi.",
-        reply_markup=back_to_main_kb(),
-    )
+    try:
+        await callback.message.edit_text(
+            "❌ Amal bekor qilindi.",
+            reply_markup=back_to_main_kb(),
+        )
+    except Exception:
+        await callback.message.answer(
+            "❌ Amal bekor qilindi.",
+            reply_markup=back_to_main_kb(),
+        )
+
+    await callback.answer()

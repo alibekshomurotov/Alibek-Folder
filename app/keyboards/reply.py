@@ -1,14 +1,15 @@
+"""Reply Keyboards"""
+
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
-from aiogram.utils.keyboard import ReplyKeyboardBuilder
 
 
-def main_reply_kb(is_admin: bool = False) -> ReplyKeyboardMarkup:
-    """Reply keyboard — faqat admin uchun Admin panel tugmasi"""
-    if not is_admin:
-        # Oddiy foydalanuvchi uchun menyu YO'Q
-        return None
-
-    builder = ReplyKeyboardBuilder()
-    builder.button(text="🔧 Admin panel")
-    builder.adjust(1)
-    return builder.as_markup(resize_keyboard=True)
+def admin_reply_kb() -> ReplyKeyboardMarkup:
+    """Admin uchun reply keyboard — faqat Admin panel tugmasi."""
+    kb = [
+        [KeyboardButton(text="🔧 Admin panel")]
+    ]
+    return ReplyKeyboardMarkup(
+        keyboard=kb,
+        resize_keyboard=True,
+        one_time_keyboard=False,
+    )

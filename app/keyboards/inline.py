@@ -1,133 +1,149 @@
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.utils.keyboard import InlineKeyboardBuilder
+"""Inline Keyboards"""
 
-from app.config import CHANNEL_TYPES
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 
 def main_menu_kb() -> InlineKeyboardMarkup:
-    """Main menu inline keyboard — faqat Profil"""
-    builder = InlineKeyboardBuilder()
-    builder.button(text="👤 Profil", callback_data="profile")
-    builder.adjust(1)
-    return builder.as_markup()
-
-
-def subscription_check_kb(channels: list) -> InlineKeyboardMarkup:
-    """Subscription check keyboard"""
-    builder = InlineKeyboardBuilder()
-
-    for ch in channels:
-        if ch.channel_type == "telegram" and ch.channel_link:
-            if ch.channel_link.startswith("@"):
-                link = f"https://t.me/{ch.channel_link[1:]}"
-            else:
-                link = ch.channel_link
-            builder.button(
-                text=f"📢 {ch.channel_name or 'Kanal'}",
-                url=link,
-            )
-
-    builder.button(text="✅ Obunani tekshirish", callback_data="check_subscription")
-    builder.adjust(1)
-    return builder.as_markup()
+    """Start xabari ostidagi inline tugma — faqat Profil."""
+    kb = [[
+        InlineKeyboardButton(text="👤 Profil", callback_data="profile")
+    ]]
+    return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
 def mp3_download_kb(cache_key: str) -> InlineKeyboardMarkup:
-    """MP3 yuklash tugmasi (video ostida) — kalit orqali"""
-    builder = InlineKeyboardBuilder()
-    builder.button(text="🎵 MP3 yuklash", callback_data=f"mp3_{cache_key}")
-    builder.adjust(1)
-    return builder.as_markup()
-
-
-def profile_kb(is_premium: bool = False) -> InlineKeyboardMarkup:
-    """Profile keyboard"""
-    builder = InlineKeyboardBuilder()
-    builder.button(text="🔙 Orqaga", callback_data="back_main")
-    builder.adjust(1)
-    return builder.as_markup()
-
-
-def premium_kb() -> InlineKeyboardMarkup:
-    """Premium info keyboard"""
-    builder = InlineKeyboardBuilder()
-    builder.button(text="🔙 Orqaga", callback_data="back_main")
-    builder.adjust(1)
-    return builder.as_markup()
+    """Video ostidagi MP3 yuklash tugmasi (cache_key orqali)."""
+    kb = [[
+        InlineKeyboardButton(text="🎵 MP3 yuklash", callback_data=f"mp3_{cache_key}")
+    ]]
+    return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
 def back_to_main_kb() -> InlineKeyboardMarkup:
-    """Back to main menu keyboard"""
-    builder = InlineKeyboardBuilder()
-    builder.button(text="🔙 Orqaga", callback_data="back_main")
-    return builder.as_markup()
+    """Orqaga qaytish tugmasi."""
+    kb = [[
+        InlineKeyboardButton(text="🔙 Orqaga", callback_data="back_main")
+    ]]
+    return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
 def cancel_kb() -> InlineKeyboardMarkup:
-    """Cancel action keyboard"""
-    builder = InlineKeyboardBuilder()
-    builder.button(text="❌ Bekor qilish", callback_data="cancel")
-    return builder.as_markup()
+    """Bekor qilish tugmasi."""
+    kb = [[
+        InlineKeyboardButton(text="❌ Bekor qilish", callback_data="cancel")
+    ]]
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def quality_select_kb(video_id: str, qualities: list = None) -> InlineKeyboardMarkup:
+    """Video sifat tanlash klaviaturasi."""
+    if qualities is None:
+        qualities = ["1080p", "720p", "480p", "360p"]
+
+    kb = []
+    row = []
+    for q in qualities:
+        row.append(InlineKeyboardButton(
+            text=f"🎥 {q.upper()}",
+            callback_data=f"quality_{video_id}_{q}",
+        ))
+        if len(row) == 2:
+            kb.append(row)
+            row = []
+
+    # MP3 tugma
+    kb.append([InlineKeyboardButton(
+        text="🎵 Audio MP3",
+        callback_data=f"quality_{video_id}_mp3",
+    )])
+    # Bekor qilish
+    kb.append([InlineKeyboardButton(
+        text="❌ Bekor qilish",
+        callback_data="cancel_download",
+    )])
+
+    return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
 # ============ Admin Keyboards ============
 
 def admin_menu_kb() -> InlineKeyboardMarkup:
-    """Admin panel main menu keyboard — Promo va Premium olib tashlandi"""
-    builder = InlineKeyboardBuilder()
-    builder.button(text="📊 Statistika", callback_data="admin_stats")
-    builder.button(text="👥 Foydalanuvchilar", callback_data="admin_users")
-    builder.button(text="📢 Reklama yuborish", callback_data="admin_mailing")
-    builder.button(text="📣 Forward xabar", callback_data="admin_forward")
-    builder.button(text="📤 Post yuborish", callback_data="admin_post")
-    builder.button(text="🚫 Ban", callback_data="admin_ban")
-    builder.button(text="✅ Unban", callback_data="admin_unban")
-    builder.button(text="📺 Kanal qo'shish", callback_data="admin_channel_add")
-    builder.button(text="🗑 Kanal o'chirish", callback_data="admin_channel_remove")
-    builder.button(text="⚙ Sozlamalar", callback_data="admin_settings")
-    builder.button(text="🔙 Bosh menyu", callback_data="back_main")
-    builder.adjust(2, 2, 2, 2, 2)
-    return builder.as_markup()
+    """Admin panel inline menyu — Promo va Premium O'CHIRILDI."""
+    kb = [
+        [
+            InlineKeyboardButton(text="📊 Statistika", callback_data="admin_stats"),
+            InlineKeyboardButton(text="👥 Foydalanuvchilar", callback_data="admin_users"),
+        ],
+        [
+            InlineKeyboardButton(text="📢 Reklama yuborish", callback_data="admin_mailing"),
+            InlineKeyboardButton(text="📣 Forward xabar", callback_data="admin_forward"),
+        ],
+        [
+            InlineKeyboardButton(text="📤 Post yuborish", callback_data="admin_post"),
+        ],
+        [
+            InlineKeyboardButton(text="🚫 Ban", callback_data="admin_ban"),
+            InlineKeyboardButton(text="✅ Unban", callback_data="admin_unban"),
+        ],
+        [
+            InlineKeyboardButton(text="📺 Kanal qo'shish", callback_data="admin_channel_add"),
+            InlineKeyboardButton(text="🗑 Kanal o'chirish", callback_data="admin_channel_remove"),
+        ],
+        [
+            InlineKeyboardButton(text="⚙ Sozlamalar", callback_data="admin_settings"),
+        ],
+        [
+            InlineKeyboardButton(text="🔙 Bosh menyu", callback_data="back_main"),
+        ],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
 def channel_type_select_kb() -> InlineKeyboardMarkup:
-    """Channel type selection keyboard"""
-    builder = InlineKeyboardBuilder()
+    """Kanal turini tanlash klaviaturasi."""
+    from app.config import CHANNEL_TYPES
+    kb = []
+    row = []
     for type_key, type_info in CHANNEL_TYPES.items():
-        builder.button(
+        row.append(InlineKeyboardButton(
             text=f"{type_info['emoji']} {type_info['name']}",
             callback_data=f"channel_type_{type_key}",
-        )
-    builder.button(text="❌ Bekor qilish", callback_data="admin_back")
-    builder.adjust(2, 2, 2, 1)
-    return builder.as_markup()
+        ))
+        if len(row) == 2:
+            kb.append(row)
+            row = []
+    if row:
+        kb.append(row)
+    kb.append([InlineKeyboardButton(text="❌ Bekor qilish", callback_data="admin_back")])
+    return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
 def channel_list_kb(channels: list) -> InlineKeyboardMarkup:
-    """Channel list for removal keyboard"""
-    builder = InlineKeyboardBuilder()
+    """Kanal ro'yxati o'chirish uchun."""
+    kb = []
     for ch in channels:
+        from app.config import CHANNEL_TYPES
         emoji = CHANNEL_TYPES.get(ch.channel_type, CHANNEL_TYPES["other"])["emoji"]
-        builder.button(
+        kb.append([InlineKeyboardButton(
             text=f"{emoji} {ch.channel_name or ch.channel_link}",
             callback_data=f"remove_channel_{ch.id}",
-        )
-    builder.button(text="🔙 Admin panel", callback_data="admin_back")
-    builder.adjust(1)
-    return builder.as_markup()
+        )])
+    kb.append([InlineKeyboardButton(text="🔙 Admin panel", callback_data="admin_back")])
+    return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
 def confirm_kb(callback_yes: str, callback_no: str = "admin_back") -> InlineKeyboardMarkup:
-    """Confirmation keyboard"""
-    builder = InlineKeyboardBuilder()
-    builder.button(text="✅ Ha", callback_data=callback_yes)
-    builder.button(text="❌ Yo'q", callback_data=callback_no)
-    builder.adjust(2)
-    return builder.as_markup()
+    """Tasdiqlash klaviaturasi."""
+    kb = [[
+        InlineKeyboardButton(text="✅ Ha", callback_data=callback_yes),
+        InlineKeyboardButton(text="❌ Yo'q", callback_data=callback_no),
+    ]]
+    return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
 def admin_back_kb() -> InlineKeyboardMarkup:
-    """Back to admin panel keyboard"""
-    builder = InlineKeyboardBuilder()
-    builder.button(text="🔙 Admin panel", callback_data="admin_back")
-    return builder.as_markup()
+    """Admin panega qaytish tugmasi."""
+    kb = [[
+        InlineKeyboardButton(text="🔙 Admin panel", callback_data="admin_back"),
+    ]]
+    return InlineKeyboardMarkup(inline_keyboard=kb)

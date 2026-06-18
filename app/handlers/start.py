@@ -1,147 +1,81 @@
+"""Start Handler - /start command"""
 
 import logging
 
-from aiogram import Router, F
+from aiogram import Router
 from aiogram.types import Message, CallbackQuery
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
-
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.types import ReplyKeyboardRemove
 
 from app.config import config
 from app.database.connection import get_session_factory
 from app.database.repositories.user_repo import UserRepository
-from app.keyboards.reply import main_reply_kb
-from app.keyboards.inline import back_to_main_kb
-from app.services.subscription_service import SubscriptionService
+from app.keyboards.inline import main_menu_kb, back_to_main_kb
 
 logger = logging.getLogger(__name__)
 
 router = Router()
 
 
-def _start_kb() -> InlineKeyboardMarkup:
-    """Start xabari ostidagi inline tugma"""
-    builder = InlineKeyboardBuilder()
-    builder.button(text="👤 Profil", callback_data="profile")
-    builder.adjust(1)
-    return builder.as_markup()
-
-
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
-    """Handle /start command"""
+    """Handle /start — xabar + INLINE Profil tugma. Reply menyu faqat admin."""
     await state.clear()
 
-    # Parse referral code from deep link
-    referred_by = None
-    if message.text and len(message.text.split()) > 1:
-        args = message.text.split()[1]
-        if args.startswith("ref_"):
-            ref_code = args[4:]
-            try:
-                session_factory = await get_session_factory()
-                async with session_factory() as session:
-                    user_repo = UserRepository(session)
-                    from sqlalchemy import select
-                    from app.database.models import User
-                    result = await session.execute(
-                        select(User).where(User.referral_code == ref_code)
-                    )
-                    referrer = result.scalar_one_or_none()
-                    if referrer and referrer.id != message.from_user.id:
-                        referred_by = referrer.id
-            except Exception as e:
-                logger.error(f"Error processing referral: {e}")
-
-    # Register or update user
-    session_factory = await get_session_factory()
-    async with session_factory() as session:
-        user_repo = UserRepository(session)
-        await user_repo.get_or_create(
-            user_id=message.from_user.id,
-            username=message.from_user.username,
-            first_name=message.from_user.first_name,
-            referred_by=referred_by,
-        )
-
-    # Check subscription
-    unsubscribed = await SubscriptionService.get_unsubscribed_channels(
-        message.bot, message.from_user.id
-    )
-
-    if unsubscribed and not config.bot.is_admin(message.from_user.id):
-        from app.keyboards.inline import subscription_check_kb
-        from app.utils.formatter import format_subscription_required
-        text = format_subscription_required(unsubscribed)
-        kb = subscription_check_kb(unsubscribed)
-        await message.answer(text, reply_markup=kb, parse_mode="HTML")
-        return
-
-    # Xabar + inline Profil tugma
-    text = (
-        f"🎬 <b>Video Downloader Bot</b>\n\n"
-        f"Ijtimoiy tarmoqdan video linkini yuboring — video yuklab beriladi.\n\n"
-        f"📱 Qo'llab-quvvatlanadi:\n"
-        f"  🎵 TikTok\n"
-        f"  📸 Instagram\n"
-        f"  ▶️ YouTube\n"
-        f"  📘 Facebook\n"
-        f"  🐦 X (Twitter)\n"
-        f"  📌 Pinterest\n"
-        f"  👻 Snapchat\n"
-        f"  🧵 Threads"
-    )
-    await message.answer(text, reply_markup=_start_kb(), parse_mode="HTML")
-
-    # Admin uchun reply keyboard
+    name = message.from_user.first_name or "Foydalanuvchi"
     is_admin = config.bot.is_admin(message.from_user.id)
+
+    # Foydalanuvchini ro'yxatdan o'tkazish
+    try:
+        session_factory = await get_session_factory()
+        async with session_factory() as session:
+            user_repo = UserRepository(session)
+            await user_repo.get_or_create(
+                user_id=message.from_user.id,
+                username=message.from_user.username,
+                first_name=message.from_user.first_name,
+            )
+    except Exception as e:
+        logger.error(f"User register error: {e}")
+
+    # Xabar matni
+    text = (
+        f"Assalomu alaykum, <b>{name}</b>! 👋\n\n"
+        f"🤖 Men YouTubedan video va Instagramdan story/reels yuklayman.\n\n"
+        f"📌 Video linkini yuboring — men yuklab beraman!"
+    )
+
+    # INLINE Profil tugma (xabar ostida) — HAMMA uchun
+    inline_kb = main_menu_kb()
+
+    # Reply menyu — FAQAT admin uchun "🔧 Admin panel"
+    # Oddiy foydalanuvchilar uchun ReplyKeyboardRemove (eski menyu ni o'chirish)
     if is_admin:
-        await message.answer("🔧 Admin panel uchun quyidagi tugmani bosing:", reply_markup=main_reply_kb(is_admin=True))
+        from app.keyboards.reply import admin_reply_kb
+        reply_kb = admin_reply_kb()
+    else:
+        reply_kb = ReplyKeyboardRemove()
+
+    await message.answer(text, reply_markup=inline_kb, parse_mode="HTML")
+    # Reply keyboard alohida xabar sifatida yuboriladi (Telegram cheklovi)
+    if is_admin:
+        await message.answer("🔧 Admin panelga o'tish uchun quyidagi tugmani ishlating:", reply_markup=reply_kb)
 
 
 @router.callback_query(F.data == "back_main")
 async def back_to_main(callback: CallbackQuery, state: FSMContext):
-    """Return to main — xabarni o'chirish"""
+    """Orqaga — asosiy xabarga qaytish"""
     await state.clear()
-    try:
-        await callback.message.delete()
-    except Exception:
-        pass
-
-
-@router.callback_query(F.data == "check_subscription")
-async def check_subscription(callback: CallbackQuery):
-    """Check if user has subscribed to required channels"""
-    is_subscribed, unsubscribed = await SubscriptionService.is_subscribed(
-        callback.bot, callback.from_user.id
+    name = callback.from_user.first_name or "Foydalanuvchi"
+    text = (
+        f"Assalomu alaykum, <b>{name}</b>! 👋\n\n"
+        f"🤖 Men YouTubedan video va Instagramdan story/reels yuklayman.\n\n"
+        f"📌 Video linkini yuboring — men yuklab beraman!"
     )
-
-    if is_subscribed or config.bot.is_admin(callback.from_user.id):
-        # Obuna bo'ldi — xabarni o'chir
-        try:
-            await callback.message.delete()
-        except Exception:
-            pass
-        # Start xabarini qayta yuborish
-        text = (
-            f"🎬 <b>Video Downloader Bot</b>\n\n"
-            f"Ijtimoiy tarmoqdan video linkini yuboring — video yuklab beriladi.\n\n"
-            f"📱 Qo'llab-quvvatlanadi:\n"
-            f"  🎵 TikTok\n"
-            f"  📸 Instagram\n"
-            f"  ▶️ YouTube\n"
-            f"  📘 Facebook\n"
-            f"  🐦 X (Twitter)\n"
-            f"  📌 Pinterest\n"
-            f"  👻 Snapchat\n"
-            f"  🧵 Threads"
-        )
-        await callback.message.answer(text, reply_markup=_start_kb(), parse_mode="HTML")
-    else:
-        from app.keyboards.inline import subscription_check_kb
-        from app.utils.formatter import format_subscription_required
-        text = format_subscription_required(unsubscribed)
-        kb = subscription_check_kb(unsubscribed)
+    kb = main_menu_kb()
+    try:
         await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    except Exception:
+        await callback.message.answer(text, reply_markup=kb, parse_mode="HTML")
+    await callback.answer()
