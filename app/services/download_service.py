@@ -1,3 +1,13 @@
+"""Download Service - Video yuklash biznes mantigi
+
+Barcha platformalar (YouTube, TikTok, Instagram, va boshqalar)
+uchun yt-dlp ishlatiladi. YouTube uchun SOCKS5 proxy orqali
+to'g'ridan-to'g'ri yt-dlp eng tezkor yo'l (5-12 soniya).
+
+youtube_api.py moduli olib tashlandi — Invidious/Piped/Cobalt
+hammasi ishlamayapti va 60+ soniya behuda sarflaydi.
+"""
+
 import logging
 import os
 import time
@@ -95,7 +105,7 @@ class DownloadService:
             "available_qualities": filtered_qualities,
             "estimated_size": format_file_size(file_size) if file_size else "N/A",
             "title": title,
-            "duration": format_duration(duration),
+            "duration": format_duration(int(float(duration))) if duration else "N/A",
             "uploader": uploader,
         }
 
