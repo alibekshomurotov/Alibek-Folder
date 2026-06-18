@@ -1,5 +1,3 @@
-"""Inline Keyboards - Premium styled buttons"""
-
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
@@ -7,14 +5,10 @@ from app.config import CHANNEL_TYPES
 
 
 def main_menu_kb() -> InlineKeyboardMarkup:
-    """Main menu inline keyboard"""
+    """Main menu inline keyboard — faqat Profil"""
     builder = InlineKeyboardBuilder()
-    builder.button(text="📥 Video yuklash", callback_data="download")
     builder.button(text="👤 Profil", callback_data="profile")
-    builder.button(text="⭐ Premium", callback_data="premium")
-    builder.button(text="📊 Statistika", callback_data="stats")
-    builder.button(text="ℹ️ Yordam", callback_data="help")
-    builder.adjust(2, 2, 1)
+    builder.adjust(1)
     return builder.as_markup()
 
 
@@ -38,57 +32,26 @@ def subscription_check_kb(channels: list) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def quality_select_kb(video_id: str, qualities: list = None) -> InlineKeyboardMarkup:
-    """Video quality selection keyboard"""
+def mp3_download_kb(cache_key: str) -> InlineKeyboardMarkup:
+    """MP3 yuklash tugmasi (video ostida) — kalit orqali"""
     builder = InlineKeyboardBuilder()
-
-    if qualities is None:
-        qualities = ["1080p", "720p", "480p", "360p"]
-
-    quality_emojis = {
-        "1080p": "🎥",
-        "720p": "🎥",
-        "480p": "📷",
-        "360p": "📷",
-    }
-
-    for q in qualities:
-        emoji = quality_emojis.get(q, "🎥")
-        builder.button(
-            text=f"{emoji} {q.upper()}",
-            callback_data=f"quality_{video_id}_{q}",
-        )
-
-    builder.button(text="🎵 Audio MP3", callback_data=f"quality_{video_id}_mp3")
-    builder.button(text="❌ Bekor qilish", callback_data="cancel_download")
-    builder.adjust(2, 2, 1)
+    builder.button(text="🎵 MP3 yuklash", callback_data=f"mp3_{cache_key}")
+    builder.adjust(1)
     return builder.as_markup()
 
 
 def profile_kb(is_premium: bool = False) -> InlineKeyboardMarkup:
     """Profile keyboard"""
     builder = InlineKeyboardBuilder()
-    builder.button(text="⭐ Premium olish", callback_data="premium")
-    builder.button(text="🔗 Taklif linki", callback_data="referral_link")
     builder.button(text="🔙 Orqaga", callback_data="back_main")
-    builder.adjust(1, 1, 1)
+    builder.adjust(1)
     return builder.as_markup()
 
 
 def premium_kb() -> InlineKeyboardMarkup:
     """Premium info keyboard"""
     builder = InlineKeyboardBuilder()
-    builder.button(text="🔑 Promo kod", callback_data="promo_code")
-    builder.button(text="🔗 Taklif linki", callback_data="referral_link")
     builder.button(text="🔙 Orqaga", callback_data="back_main")
-    builder.adjust(1, 1, 1)
-    return builder.as_markup()
-
-
-def mp3_download_kb(url: str) -> InlineKeyboardMarkup:
-    """MP3 yuklash tugmasi (video ostida)"""
-    builder = InlineKeyboardBuilder()
-    builder.button(text="🎵 MP3 yuklash", callback_data=f"mp3_{url[:200]}")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -96,7 +59,7 @@ def mp3_download_kb(url: str) -> InlineKeyboardMarkup:
 def back_to_main_kb() -> InlineKeyboardMarkup:
     """Back to main menu keyboard"""
     builder = InlineKeyboardBuilder()
-    builder.button(text="🔙 Bosh menyu", callback_data="back_main")
+    builder.button(text="🔙 Orqaga", callback_data="back_main")
     return builder.as_markup()
 
 
@@ -110,22 +73,20 @@ def cancel_kb() -> InlineKeyboardMarkup:
 # ============ Admin Keyboards ============
 
 def admin_menu_kb() -> InlineKeyboardMarkup:
-    """Admin panel main menu keyboard"""
+    """Admin panel main menu keyboard — Promo va Premium olib tashlandi"""
     builder = InlineKeyboardBuilder()
     builder.button(text="📊 Statistika", callback_data="admin_stats")
     builder.button(text="👥 Foydalanuvchilar", callback_data="admin_users")
     builder.button(text="📢 Reklama yuborish", callback_data="admin_mailing")
     builder.button(text="📣 Forward xabar", callback_data="admin_forward")
     builder.button(text="📤 Post yuborish", callback_data="admin_post")
-    builder.button(text="🎁 Promo kod", callback_data="admin_promo")
-    builder.button(text="⭐ Premium berish", callback_data="admin_premium_grant")
     builder.button(text="🚫 Ban", callback_data="admin_ban")
     builder.button(text="✅ Unban", callback_data="admin_unban")
     builder.button(text="📺 Kanal qo'shish", callback_data="admin_channel_add")
     builder.button(text="🗑 Kanal o'chirish", callback_data="admin_channel_remove")
     builder.button(text="⚙ Sozlamalar", callback_data="admin_settings")
     builder.button(text="🔙 Bosh menyu", callback_data="back_main")
-    builder.adjust(2, 2, 2, 2, 2, 1)
+    builder.adjust(2, 2, 2, 2, 2)
     return builder.as_markup()
 
 

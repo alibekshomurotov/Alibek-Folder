@@ -1,6 +1,6 @@
+
 import logging
 import os
-from typing import Optional
 
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
@@ -10,7 +10,6 @@ from aiogram.fsm.context import FSMContext
 from app.config import config, CHANNEL_TYPES
 from app.database.connection import get_session_factory
 from app.database.repositories.user_repo import UserRepository
-from app.database.repositories.channel_repo import ChannelRepository
 from app.services.admin_service import AdminService
 from app.services.subscription_service import SubscriptionService
 from app.keyboards.inline import (
@@ -37,19 +36,9 @@ def is_admin(user_id: int) -> bool:
 
 @router.message(Command("admin"))
 async def cmd_admin(message: Message, state: FSMContext):
-    """Open admin panel — /admin buyrug'i"""
-    await _open_admin_panel(message, state)
-
-
-@router.message(F.text == "🔧 Admin panel")
-async def msg_admin_panel(message: Message, state: FSMContext):
-    """Open admin panel — reply keyboard tugmasi"""
-    await _open_admin_panel(message, state)
-
-
-async def _open_admin_panel(message: Message, state: FSMContext):
-    """Admin panelni ochish"""
+    """Open admin panel"""
     if not is_admin(message.from_user.id):
+        await message.answer("❌ Siz admin emassiz.")
         return
 
     await state.clear()
@@ -83,7 +72,15 @@ async def admin_stats(callback: CallbackQuery):
         return
 
     stats = await AdminService.get_stats()
-    text = format_admin_stats(**stats)
+    text = format_admin_stats(
+        total_users=stats.get("total_users", 0),
+        today_users=stats.get("today_users", 0),
+        total_downloads=stats.get("total_downloads", 0),
+        today_downloads=stats.get("today_downloads", 0),
+        premium_count=stats.get("premium_count", 0),
+        total_channels=stats.get("total_channels", 0),
+        platform_stats=stats.get("platform_stats", {}),
+    )
     kb = admin_back_kb()
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
 
@@ -96,20 +93,16 @@ async def admin_users(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         return
 
-    # BARCHA foydalanuvchilarni olish (limit yo'q)
-    users = await AdminService.get_users(limit=10000)
+    users = await AdminService.get_top_users(10)
 
-    text = f"👥 {bold('Barcha foydalanuvchilar')} ({len(users)})\n\n{separator()}\n\n"
+    text = f"👥 {bold('Eng faol foydalanuvchilar')}\n\n{separator()}\n\n"
     for i, user in enumerate(users, 1):
+        premium_badge = " ⭐" if user.is_premium_active else ""
         banned_badge = " 🚫" if user.is_banned else ""
         text += (
-            f"{i}. {user.first_name or 'N/A'} (@{user.username or 'N/A'}){banned_badge}\n"
+            f"{i}. {user.first_name or 'N/A'} (@{user.username or 'N/A'}){premium_badge}{banned_badge}\n"
             f"   🆔 {user.id} | 📥 {user.downloads_count} | 🔄 {user.referrals_count}\n\n"
         )
-
-    # Telegram xabar chegarasi — agar juda uzun bo'lsa, qisqartiramiz
-    if len(text) > 4000:
-        text = text[:3900] + f"\n\n... va yana {len(users) - 10} ta foydalanuvchi"
 
     kb = admin_back_kb()
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
@@ -141,7 +134,7 @@ async def process_mailing_message(message: Message, state: FSMContext):
 
     text = (
         f"📢 {bold('Tasdiqlash')}\n\n"
-        f"Quyidagi xabar barcha foydalanuvchilarga yuboriladi:\n\n"
+        f"Quyidagi xabar barcha foydalanuvchilarga yuboriladi.\n\n"
         f"⚠️ Tasdiqlaysizmi?"
     )
     await message.answer(text, reply_markup=confirm_kb("mailing_confirm_yes", "admin_back"), parse_mode="HTML")
@@ -156,9 +149,7 @@ async def confirm_mailing(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     await state.clear()
 
-    # Get all users
     users = await AdminService.get_users(limit=10000)
-
     success = 0
     failed = 0
 
@@ -176,8 +167,7 @@ async def confirm_mailing(callback: CallbackQuery, state: FSMContext):
             failed += 1
             logger.warning(f"Failed to send mailing to {user.id}: {e}")
 
-        # Update progress every 10 users
-        if (i + 1) % 10 == 0:
+        if (i + 1) % 10 == 0 and users:
             progress = int((i + 1) / len(users) * 100)
             try:
                 await status_msg.edit_text(f"📢 Yuborilmoqda... {progress}%")
@@ -215,23 +205,31 @@ async def process_forward_message(message: Message, state: FSMContext):
     """Process forward message"""
     await state.clear()
     users = await AdminService.get_users(limit=10000)
-
     success = 0
     failed = 0
 
-    for user in users:
+    status_msg = await message.answer("📣 Forward qilinmoqda...")
+
+    for i, user in enumerate(users):
         try:
             await message.forward(chat_id=user.id)
             success += 1
         except Exception:
             failed += 1
 
+        if (i + 1) % 10 == 0 and users:
+            progress = int((i + 1) / len(users) * 100)
+            try:
+                await status_msg.edit_text(f"📣 Forward qilinmoqda... {progress}%")
+            except Exception:
+                pass
+
     text = (
         f"📣 {bold('Forward tugadi')}\n\n"
         f"✅ Muvaffaqiyatli: {success}\n"
         f"❌ Xatolik: {failed}"
     )
-    await message.answer(text, reply_markup=admin_back_kb(), parse_mode="HTML")
+    await status_msg.edit_text(text, reply_markup=admin_back_kb(), parse_mode="HTML")
 
 
 # ============ Post ============
@@ -253,7 +251,7 @@ async def admin_post(callback: CallbackQuery, state: FSMContext):
 
 @router.message(AdminStates.post_message)
 async def process_post_message(message: Message, state: FSMContext):
-    """Process post message - same as mailing but with copy_message"""
+    """Process post message"""
     await state.update_data(post_message=message.message_id, post_chat_id=message.chat.id)
     await state.set_state(AdminStates.post_confirm)
 
@@ -278,7 +276,9 @@ async def confirm_post(callback: CallbackQuery, state: FSMContext):
     success = 0
     failed = 0
 
-    for user in users:
+    status_msg = await callback.message.answer("📤 Yuborilmoqda... 0%")
+
+    for i, user in enumerate(users):
         try:
             await callback.bot.copy_message(
                 chat_id=user.id,
@@ -289,12 +289,19 @@ async def confirm_post(callback: CallbackQuery, state: FSMContext):
         except Exception:
             failed += 1
 
+        if (i + 1) % 10 == 0 and users:
+            progress = int((i + 1) / len(users) * 100)
+            try:
+                await status_msg.edit_text(f"📤 Yuborilmoqda... {progress}%")
+            except Exception:
+                pass
+
     text = (
         f"📤 {bold('Post yuborildi')}\n\n"
         f"✅ Muvaffaqiyatli: {success}\n"
         f"❌ Xatolik: {failed}"
     )
-    await callback.message.edit_text(text, reply_markup=admin_back_kb(), parse_mode="HTML")
+    await status_msg.edit_text(text, reply_markup=admin_back_kb(), parse_mode="HTML")
 
 
 # ============ Ban ============
@@ -431,7 +438,6 @@ async def process_channel_link(message: Message, state: FSMContext):
     data = await state.get_data()
     channel_type = data.get("channel_type", "telegram")
 
-    # For Telegram channels, try to resolve channel ID
     channel_id = None
     if channel_type == "telegram":
         from app.utils.helpers import parse_telegram_channel_id
@@ -442,7 +448,6 @@ async def process_channel_link(message: Message, state: FSMContext):
             )
             return
 
-        # Try to get channel info
         try:
             chat = await message.bot.get_chat(channel_id)
             channel_name = chat.title
@@ -452,7 +457,6 @@ async def process_channel_link(message: Message, state: FSMContext):
     else:
         channel_name = link
 
-    # Add channel to database
     await SubscriptionService.add_channel(
         channel_link=link,
         channel_name=channel_name,

@@ -1,12 +1,9 @@
-"""Video Handler - Video yuklash va yuborish
 
-Oqim: Link → ⏳ qum soat animatsiyasi → Video yuborish → Qum soat yoqoladi
-Video ostida: 🎵 MP3 yuklash tugmasi
-Caption: @UzVideoSaveBot
-"""
 
 import asyncio
+import hashlib
 import logging
+import time
 from typing import Dict
 
 from aiogram import Router, F, Bot
@@ -34,29 +31,43 @@ logger = logging.getLogger(__name__)
 
 router = Router()
 
-# URL larni vaqtincha saqlash (MP3 uchun)
+# URL larni vaqtincha saqlash (MP3 uchun) — kalit: qisqa hash
 _url_cache: Dict[str, str] = {}
 
-# Yuklash animatsiyasi matnlari
-_LOADING_STEPS = [
-    "⏳ Yuklab olinmoqda...",
-    "⏳ Video yuklanmoqda...",
-    "⏳ Fayl tayyorlanmoqda...",
-    "⏳ Deyarli tayyor...",
-    "⏳ Yuborishga tayyorlanmoqda...",
+# Qum soat stiker ID (Telegram rasmiy hourglass stiker seti)
+_HOURGLASS_STICKERS = [
+    "CAACAgUAAxkBAAIIOmZb8ABHxiG0xSRf9v7rOeBBvlXxAAIJAAP20QgUw2lKRaXhOG2aBA",
+    "CAACAgUAAxkBAAIIO2Zb8AAyGQf0xSWbLrAOguAOo7LR3AAJOAAP20QgU3ABErShD-nnBA",
+    "CAACAgUAAxkBAAIIPGZb8AAyGRKwMRUyg0Uj2hAARxSRmAAJLAAP20QgU_7mdkWj7KyBA",
+    "CAACAgUAAxkBAAIIPWZb8AAyGSaQMRUgSlT1bgABh7G-iAAJMAAP20QgU6YsEqDqv2rBA",
 ]
 
 
-async def _animate_loading(bot: Bot, message: Message):
-    """Qum soat animatsiyasi — video chiqguncha aylanaveradi."""
-    step = 0
+def _cache_url(url: str) -> str:
+    """URL ni keshga saqlash va qisqa kalit qaytarish."""
+    key = hashlib.md5(url.encode()).hexdigest()[:10]
+    _url_cache[key] = url
+
+    # Keshni 100 tadan ortiqsa tozalash
+    if len(_url_cache) > 100:
+        keys_to_remove = list(_url_cache.keys())[:50]
+        for k in keys_to_remove:
+            del _url_cache[k]
+
+    return key
+
+
+async def _animate_hourglass(bot: Bot, sticker_msg):
+    """Qum soat stiker animatsiyasi — video chiqguncha aylanaveradi."""
+    idx = 0
     try:
         while True:
-            await asyncio.sleep(2)
-            step += 1
-            text = _LOADING_STEPS[step % len(_LOADING_STEPS)]
+            await asyncio.sleep(1)
+            idx = (idx + 1) % len(_HOURGLASS_STICKERS)
             try:
-                await message.edit_text(text)
+                await sticker_msg.edit_media(
+                    {"type": "sticker", "media": _HOURGLASS_STICKERS[idx]}
+                )
             except Exception:
                 break
     except asyncio.CancelledError:
@@ -68,10 +79,10 @@ async def handle_video_link(message: Message, state: FSMContext):
     """Foydalanuvchi link yuborsa — to'g'ridan-to'g'ri yuklab video yuborish.
 
     1. Link tekshiriladi
-    2. ⏳ Qum soat animatsiyasi boshlanadi
-    3. Video yuklanadi (eng yaxshi sifat)
-    4. Video yuboriladi (qum soat hali turadi)
-    5. Qum soat yoqoladi
+    2. ⏳ Qum soat STIKER chiqadi va aylanaveradi
+    3. Video yuklanadi
+    4. Video yuboriladi (stiker hali ko'rinadi)
+    5. Stiker yoqoladi
     6. Video ostida MP3 tugmasi
     """
     url = extract_url(message.text or "")
@@ -82,7 +93,6 @@ async def handle_video_link(message: Message, state: FSMContext):
     if not is_video_url(url):
         await message.answer(
             format_error("invalid_link"),
-            reply_markup=back_to_main_kb(),
             parse_mode="HTML",
         )
         return
@@ -113,12 +123,18 @@ async def handle_video_link(message: Message, state: FSMContext):
     except Exception as e:
         logger.warning(f"Foydalanuvchi ro'yxati xatosi: {e}")
 
-    # ⏳ Qum soat animatsiyasi boshlash
-    loading_msg = await message.answer("⏳ Yuklab olinmoqda...")
-    animation_task = asyncio.create_task(_animate_loading(message.bot, loading_msg))
+    # ⏳ Qum soat STIKER yuborish va animatsiya boshlash
+    try:
+        sticker_msg = await message.answer_sticker(_HOURGLASS_STICKERS[0])
+    except Exception:
+        # Stiker yuborilmasa — matn bilan
+        sticker_msg = await message.answer("⏳ Yuklab olinmoqda...")
+        _HOURGLASS_STICKERS.clear()  # stiker yo'q deb belgila
+
+    animation_task = asyncio.create_task(_animate_hourglass(message.bot, sticker_msg))
 
     try:
-        # Video yuklash — eng yaxshi sifatda
+        # Video yuklash
         result = await DownloadService.download(
             url=url,
             quality="720p",
@@ -129,24 +145,28 @@ async def handle_video_link(message: Message, state: FSMContext):
         if result is None:
             animation_task.cancel()
             try:
-                await loading_msg.edit_text(
-                    format_error("download_error"),
-                    reply_markup=back_to_main_kb(),
-                    parse_mode="HTML",
-                )
+                await sticker_msg.delete()
             except Exception:
                 pass
+            await message.answer(
+                format_error("download_error"),
+                reply_markup=back_to_main_kb(),
+                parse_mode="HTML",
+            )
             return
 
         file_path = result["file_path"]
         file_size_mb = result["file_size_mb"]
 
-        # Animatsiyani to'xtatamiz (qum soat hali ko'rinadi)
+        # Animatsiyani to'xtatamiz (stiker hali ko'rinadi)
         animation_task.cancel()
 
-        # Video YUBORAMIZ — qum soat hali turadi
+        # MP3 uchun URL ni keshga saqlash
+        cache_key = _cache_url(url)
+
+        # Video YUBORAMIZ — stiker hali turadi
         caption = format_video_caption(result["info"])
-        mp3_kb = mp3_download_kb(url)
+        mp3_kb = mp3_download_kb(cache_key)
 
         try:
             if file_size_mb > config.download.max_file_size_mb:
@@ -181,9 +201,9 @@ async def handle_video_link(message: Message, state: FSMContext):
         finally:
             cleanup_file(file_path)
 
-        # Video chatda ko'rindi — ⏳ qum soatni endi o'chiramiz
+        # Video chatda ko'rindi — ⏳ stikerni endi o'chiramiz
         try:
-            await loading_msg.delete()
+            await sticker_msg.delete()
         except Exception:
             pass
 
@@ -191,7 +211,11 @@ async def handle_video_link(message: Message, state: FSMContext):
         animation_task.cancel()
         logger.error(f"Yuklash xatosi: {e}")
         try:
-            await loading_msg.edit_text(
+            await sticker_msg.delete()
+        except Exception:
+            pass
+        try:
+            await message.answer(
                 format_error("server_error"),
                 reply_markup=back_to_main_kb(),
                 parse_mode="HTML",
@@ -203,17 +227,23 @@ async def handle_video_link(message: Message, state: FSMContext):
 @router.callback_query(F.data.startswith("mp3_"))
 async def handle_mp3_download(callback: CallbackQuery, state: FSMContext):
     """MP3 yuklash tugmasi bosildi — audio yuklab yuborish."""
-    url = callback.data[4:]  # "mp3_" olib tashlash
+    cache_key = callback.data[4:]  # "mp3_" olib tashlash
+    url = _url_cache.get(cache_key)
 
     if not url:
-        await callback.answer("❌ URL topilmadi", show_alert=True)
+        await callback.answer("⏰ Sessiya tugadi. Qayta link yuboring.", show_alert=True)
         return
 
     await callback.answer("🎵 MP3 yuklanmoqda...")
 
-    # ⏳ Qum soat animatsiyasi
-    loading_msg = await callback.message.answer("⏳ MP3 yuklab olinmoqda...")
-    animation_task = asyncio.create_task(_animate_loading(callback.bot, loading_msg))
+    # ⏳ Qum soat stiker animatsiyasi
+    try:
+        sticker_msg = await callback.message.answer_sticker(_HOURGLASS_STICKERS[0])
+    except Exception:
+        sticker_msg = await callback.message.answer("⏳ MP3 yuklab olinmoqda...")
+        _HOURGLASS_STICKERS.clear()
+
+    animation_task = asyncio.create_task(_animate_hourglass(callback.bot, sticker_msg))
 
     try:
         result = await DownloadService.download(
@@ -226,12 +256,13 @@ async def handle_mp3_download(callback: CallbackQuery, state: FSMContext):
         if result is None:
             animation_task.cancel()
             try:
-                await loading_msg.edit_text(
-                    "❌ MP3 yuklab bo'lmadi.",
-                    reply_markup=back_to_main_kb(),
-                )
+                await sticker_msg.delete()
             except Exception:
                 pass
+            await callback.message.answer(
+                "❌ MP3 yuklab bo'lmadi.",
+                reply_markup=back_to_main_kb(),
+            )
             return
 
         file_path = result["file_path"]
@@ -239,7 +270,7 @@ async def handle_mp3_download(callback: CallbackQuery, state: FSMContext):
         # Animatsiyani to'xtatamiz
         animation_task.cancel()
 
-        # Audio YUBORAMIZ — qum soat hali turadi
+        # Audio YUBORAMIZ — stiker hali turadi
         try:
             await callback.message.answer_audio(
                 audio=FSInputFile(file_path),
@@ -250,9 +281,9 @@ async def handle_mp3_download(callback: CallbackQuery, state: FSMContext):
         finally:
             cleanup_file(file_path)
 
-        # Audio chatda ko'rindi — qum soatni o'chiramiz
+        # Audio chatda ko'rindi — stikerni o'chiramiz
         try:
-            await loading_msg.delete()
+            await sticker_msg.delete()
         except Exception:
             pass
 
@@ -260,7 +291,11 @@ async def handle_mp3_download(callback: CallbackQuery, state: FSMContext):
         animation_task.cancel()
         logger.error(f"MP3 yuklash xatosi: {e}")
         try:
-            await loading_msg.edit_text(
+            await sticker_msg.delete()
+        except Exception:
+            pass
+        try:
+            await callback.message.answer(
                 "❌ MP3 yuklash xatosi.",
                 reply_markup=back_to_main_kb(),
             )
@@ -279,19 +314,5 @@ async def cancel_download(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "download")
 async def callback_download(callback: CallbackQuery):
-    """Download tugmasi bosildi — platformalar ro'yxatini ko'rsatish"""
-    await callback.message.edit_text(
-        f"📥 {bold('Video yuklash')}\n\n"
-        f"Ijtimoiy tarmoqdan video linkini yuboring.\n\n"
-        f"📱 Qo'llab-quvvatlanadi:\n"
-        f"  🎵 TikTok\n"
-        f"  📸 Instagram\n"
-        f"  ▶️ YouTube\n"
-        f"  📘 Facebook\n"
-        f"  🐦 X (Twitter)\n"
-        f"  📌 Pinterest\n"
-        f"  👻 Snapchat\n"
-        f"  🧵 Threads",
-        reply_markup=back_to_main_kb(),
-        parse_mode="HTML",
-    )
+    """Download tugmasi bosildi — hech narsa qilmaymiz (link yuborish yetarli)"""
+    await callback.message.delete()
