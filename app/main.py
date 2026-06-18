@@ -1,3 +1,5 @@
+"""Video Downloader Pro - Main Entry Point"""
+
 import asyncio
 import logging
 import sys
@@ -43,7 +45,7 @@ async def main():
     dp = Dispatcher()
 
     # Register middleware
-    from app.middleware.auth import AuthMiddleware, SubscriptionMiddleware
+    from app.middleware.auth import AuthMiddleware
     from app.middleware.throttle import ThrottleMiddleware
     from app.middleware.logging import LoggingMiddleware
 
@@ -51,8 +53,6 @@ async def main():
     dp.callback_query.middleware(ThrottleMiddleware())
     dp.message.middleware(AuthMiddleware())
     dp.callback_query.middleware(AuthMiddleware())
-    dp.message.middleware(SubscriptionMiddleware())
-    dp.callback_query.middleware(SubscriptionMiddleware())
     dp.message.middleware(LoggingMiddleware())
     dp.callback_query.middleware(LoggingMiddleware())
 
