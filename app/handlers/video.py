@@ -5,7 +5,7 @@ from typing import Dict
 from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery, FSInputFile
 from aiogram.fsm.context import FSMContext
-from aiogram.filter import StateFilter
+from aiogram.filters import StateFilter
 
 from app.config import config
 from app.database.connection import get_session_factory
