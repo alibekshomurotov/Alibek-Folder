@@ -8,7 +8,8 @@ from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 
-from app.handlers import start, video, profile, admin, cancel
+from app.handlers import start, video, profile, admin
+from app.handlers import callback_cancel as cancel
 from app.middleware.throttle import ThrottleMiddleware
 from app.middleware.auth import AuthMiddleware
 from app.middleware.logging import LoggingMiddleware
