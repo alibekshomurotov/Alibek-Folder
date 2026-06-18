@@ -83,6 +83,11 @@ HEADERS = {
 _FAST_INVIDIOUS = INVIDIOUS_INSTANCES[:5]
 _FAST_PIPED = PIPED_INSTANCES[:3]
 
+# Timeout sozlamalari (soniya)
+_INVIDIOUS_TIMEOUT = 6
+_PIPED_TIMEOUT = 6
+_INVIDIOUS_DOWNLOAD_TIMEOUT = 10  # Invidious proxy download uchun
+
 # InnerTube API klientlari - 2026 iyun yangilangan versiyalar
 INNERTUBE_CLIENTS = {
     "android": {
@@ -830,7 +835,7 @@ async def _try_invidious(video_id: str, fast_only: bool = False) -> Optional[Dic
         try:
             async with aiohttp.ClientSession(headers=HEADERS) as session:
                 url = f"{instance}/api/v1/videos/{video_id}"
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=_INVIDIOUS_TIMEOUT)) as resp:
                     if resp.status != 200:
                         logger.debug(f"[Invidious] {instance}: HTTP {resp.status}")
                         continue
@@ -876,7 +881,7 @@ async def _try_piped(video_id: str, fast_only: bool = False) -> Optional[Dict[st
         try:
             async with aiohttp.ClientSession(headers=HEADERS) as session:
                 url = f"{instance}/streams/{video_id}"
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=_PIPED_TIMEOUT)) as resp:
                     if resp.status != 200:
                         logger.debug(f"[Piped] {instance}: HTTP {resp.status}")
                         continue
@@ -916,7 +921,7 @@ async def _try_invidious_proxy_download(video_id: str, quality: str = "720",
 
     YANGILANGAN: Proxy ishlatmaymiz (Invidious o'zi YouTube ga murojaat qiladi).
     """
-    instances = _FAST_INVIDIOUS[:4]
+    instances = _FAST_INVIDIOUS[:5]  # 5 ta instance sinash
 
     target_height = int(quality.replace("p", "")) if not audio_only else 0
 
@@ -924,8 +929,9 @@ async def _try_invidious_proxy_download(video_id: str, quality: str = "720",
         try:
             async with aiohttp.ClientSession(headers=HEADERS) as session:
                 api_url = f"{instance}/api/v1/videos/{video_id}"
-                async with session.get(api_url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                async with session.get(api_url, timeout=aiohttp.ClientTimeout(total=_INVIDIOUS_DOWNLOAD_TIMEOUT)) as resp:
                     if resp.status != 200:
+                        logger.debug(f"[Invidious-Proxy] {instance}: HTTP {resp.status}")
                         continue
 
                     data = await resp.json()
@@ -986,11 +992,13 @@ async def get_youtube_info_via_api(url: str, skip_cobalt: bool = False,
                                     skip_innertube: bool = False) -> Optional[Dict[str, Any]]:
     """YouTube video ma'lumotlarini API orqali olish.
 
-    STRATEGIYA:
-    1. Cobalt API (agar skip_cobalt=False)
-    2. InnerTube API (agar skip_innertube=False)
-    3. Invidious (tezkor, keyin to'liq)
-    4. Piped (tezkor, keyin to'liq)
+    YANGI STRATEGIYA (datacenter IP uchun):
+    1. Invidious (tezkor) — datacenter IP da ishlaydi
+    2. Piped (tezkor) — datacenter IP da ishlaydi
+    3. Invidious (to'liq) — ko'proq instance
+    4. Piped (to'liq) — ko'proq instance
+    5. Cobalt API — o'z server orqali
+    6. InnerTube API — faqat SOCKS5 proxy bilan
     """
     video_id = _extract_video_id(url)
     if not video_id:
@@ -999,7 +1007,27 @@ async def get_youtube_info_via_api(url: str, skip_cobalt: bool = False,
 
     logger.info(f"[API] Video ID: {video_id}")
 
-    # === 1-USUL: Cobalt API ===
+    # === 1-USUL: Invidious (tezkor) — datacenter IP da ishlaydi ===
+    result = await _try_invidious(video_id, fast_only=True)
+    if result:
+        return result
+
+    # === 2-USUL: Piped (tezkor) ===
+    result = await _try_piped(video_id, fast_only=True)
+    if result:
+        return result
+
+    # === 3-USUL: Invidious (to'liq) ===
+    result = await _try_invidious(video_id, fast_only=False)
+    if result:
+        return result
+
+    # === 4-USUL: Piped (to'liq) ===
+    result = await _try_piped(video_id, fast_only=False)
+    if result:
+        return result
+
+    # === 5-USUL: Cobalt API ===
     if not skip_cobalt:
         cobalt_result = await _try_cobalt(url, "720", False)
         if cobalt_result and cobalt_result.get("download_url"):
@@ -1013,35 +1041,13 @@ async def get_youtube_info_via_api(url: str, skip_cobalt: bool = False,
                 "video_id": video_id,
                 "_cobalt_available": True,
             }
-        else:
-            logger.info("[API] Cobalt ishlamadi, keyingi usulga o'tilmoqda...")
 
-    # === 2-USUL: InnerTube API ===
-    if not skip_innertube:
+    # === 6-USUL: InnerTube API (faqat SOCKS5 proxy bilan) ===
+    if not skip_innertube and _is_proxy_available():
         innertube_result = await _try_innertube(video_id, "720", False)
         if innertube_result:
             logger.info("[API] InnerTube orqali ma'lumot olindi!")
             return innertube_result
-
-    # === 3-USUL: Invidious (tezkor) ===
-    result = await _try_invidious(video_id, fast_only=True)
-    if result:
-        return result
-
-    # === 4-USUL: Piped (tezkor) ===
-    result = await _try_piped(video_id, fast_only=True)
-    if result:
-        return result
-
-    # === 5-USUL: Invidious (to'liq) ===
-    result = await _try_invidious(video_id, fast_only=False)
-    if result:
-        return result
-
-    # === 6-USUL: Piped (to'liq) ===
-    result = await _try_piped(video_id, fast_only=False)
-    if result:
-        return result
 
     logger.error("[API] Barcha API serverlar ishlamadi")
     return None
@@ -1053,18 +1059,90 @@ async def download_youtube_via_api(url: str, quality: str = "720",
                                     skip_innertube: bool = False) -> Optional[Tuple[str, Dict[str, Any]]]:
     """YouTube videosini API orqali yuklab olish.
 
-    STRATEGIYA:
-    1. Cobalt API (agar skip_cobalt=False)
-    2. InnerTube API (agar skip_innertube=False)
-    3. Invidious proxy download
-    4. Invidious/Piped API orqali yuklash
+    YANGI STRATEGIYA (datacenter IP uchun optimallashtirilgan):
+    1. Invidious proxy download — Invidious YouTube ga o'zi murojaat qiladi
+    2. Invidious API -> download
+    3. Piped API -> download
+    4. Invidious (to'liq ro'yxat) -> download
+    5. Piped (to'liq ro'yxat) -> download
+    6. Cobalt API (agar skip_cobalt=False)
+    7. InnerTube API (faqat SOCKS5 proxy bilan)
     """
     video_id = _extract_video_id(url)
     start_time = time.time()
 
-    # 1: COBALT
-    if not skip_cobalt:
-        logger.info("[API] 1-usul: Cobalt orqali yuklanmoqda...")
+    # 1: INVIDIOUS PROXY DOWNLOAD — eng yaxshi datacenter IP yechim
+    logger.info("[API] 1-usul: Invidious proxy orqali yuklanmoqda...")
+    inv_proxy_result = await _try_invidious_proxy_download(video_id, quality, audio_only)
+    if inv_proxy_result:
+        logger.info(f"[API] Invidious proxy MUVOFAQIYATLI ({time.time()-start_time:.1f}s)")
+        return inv_proxy_result
+    logger.info(f"[API] Invidious proxy ishlamadi ({time.time()-start_time:.1f}s), keyingi usul...")
+
+    # 2: INVIDIOUS API (tezkor)
+    elapsed = time.time() - start_time
+    if elapsed < 50:
+        logger.info("[API] 2-usul: Invidious orqali yuklanmoqda...")
+        inv_result = await _try_invidious(video_id, fast_only=True)
+        if inv_result:
+            download_url, file_ext = _find_best_invidious_download(inv_result["data"], quality, audio_only)
+            if download_url:
+                result = await _download_from_url(download_url, video_id, audio_only, file_ext)
+                if result:
+                    info = convert_api_info_to_ytdlp(inv_result)
+                    logger.info(f"[API] Invidious MUVOFAQIYATLI ({time.time()-start_time:.1f}s)")
+                    return result, info
+        logger.info(f"[API] Invidious ishlamadi ({time.time()-start_time:.1f}s), keyingi usul...")
+
+    # 3: PIPED (tezkor)
+    elapsed = time.time() - start_time
+    if elapsed < 50:
+        logger.info("[API] 3-usul: Piped orqali yuklanmoqda...")
+        piped_result = await _try_piped(video_id, fast_only=True)
+        if piped_result:
+            download_url, file_ext = _find_best_piped_download(piped_result["data"], quality, audio_only)
+            if download_url:
+                result = await _download_from_url(download_url, video_id, audio_only, file_ext)
+                if result:
+                    info = convert_api_info_to_ytdlp(piped_result)
+                    logger.info(f"[API] Piped MUVOFAQIYATLI ({time.time()-start_time:.1f}s)")
+                    return result, info
+        logger.info(f"[API] Piped ishlamadi ({time.time()-start_time:.1f}s), keyingi usul...")
+
+    # 4: INVIDIOUS (to'liq ro'yxat)
+    elapsed = time.time() - start_time
+    if elapsed < 50:
+        logger.info("[API] 4-usul: Invidious (to'liq) orqali yuklanmoqda...")
+        inv_result = await _try_invidious(video_id, fast_only=False)
+        if inv_result:
+            download_url, file_ext = _find_best_invidious_download(inv_result["data"], quality, audio_only)
+            if download_url:
+                result = await _download_from_url(download_url, video_id, audio_only, file_ext)
+                if result:
+                    info = convert_api_info_to_ytdlp(inv_result)
+                    logger.info(f"[API] Invidious (to'liq) MUVOFAQIYATLI ({time.time()-start_time:.1f}s)")
+                    return result, info
+        logger.info(f"[API] Invidious (to'liq) ishlamadi ({time.time()-start_time:.1f}s), keyingi usul...")
+
+    # 5: PIPED (to'liq ro'yxat)
+    elapsed = time.time() - start_time
+    if elapsed < 50:
+        logger.info("[API] 5-usul: Piped (to'liq) orqali yuklanmoqda...")
+        piped_result = await _try_piped(video_id, fast_only=False)
+        if piped_result:
+            download_url, file_ext = _find_best_piped_download(piped_result["data"], quality, audio_only)
+            if download_url:
+                result = await _download_from_url(download_url, video_id, audio_only, file_ext)
+                if result:
+                    info = convert_api_info_to_ytdlp(piped_result)
+                    logger.info(f"[API] Piped (to'liq) MUVOFAQIYATLI ({time.time()-start_time:.1f}s)")
+                    return result, info
+        logger.info(f"[API] Piped (to'liq) ishlamadi ({time.time()-start_time:.1f}s), keyingi usul...")
+
+    # 6: COBALT (faqat skip bo'lmasa)
+    elapsed = time.time() - start_time
+    if elapsed < 50 and not skip_cobalt:
+        logger.info("[API] 6-usul: Cobalt orqali yuklanmoqda...")
         cobalt_result = await _try_cobalt(url, quality, audio_only)
         if cobalt_result:
             download_url = cobalt_result.get("download_url")
@@ -1074,16 +1152,12 @@ async def download_youtube_via_api(url: str, quality: str = "720",
                     info = _make_basic_info(url, video_id, audio_only)
                     logger.info(f"[API] Cobalt MUVOFAQIYATLI ({time.time()-start_time:.1f}s)")
                     return result, info
-                else:
-                    logger.warning("[API] Cobalt URL topildi lekin yuklab bo'lmadi")
-            else:
-                logger.warning("[API] Cobalt javobida download_url yo'q")
-        else:
-            logger.info(f"[API] Cobalt ishlamadi ({time.time()-start_time:.1f}s), keyingi usul...")
+        logger.info(f"[API] Cobalt ishlamadi ({time.time()-start_time:.1f}s), keyingi usul...")
 
-    # 2: INNERTUBE
-    if not skip_innertube:
-        logger.info("[API] 2-usul: InnerTube orqali yuklanmoqda...")
+    # 7: INNERTUBE (faqat SOCKS5 proxy bilan)
+    elapsed = time.time() - start_time
+    if elapsed < 50 and not skip_innertube and _is_proxy_available():
+        logger.info("[API] 7-usul: InnerTube orqali yuklanmoqda...")
         innertube_result = await _try_innertube(video_id, quality, audio_only)
         if innertube_result:
             download_url, file_ext, fmt_info = _extract_innertube_download(
@@ -1095,55 +1169,6 @@ async def download_youtube_via_api(url: str, quality: str = "720",
                     info = fmt_info or _make_basic_info(url, video_id, audio_only)
                     logger.info(f"[API] InnerTube MUVOFAQIYATLI ({time.time()-start_time:.1f}s)")
                     return result, info
-                else:
-                    logger.warning("[API] InnerTube URL topildi lekin yuklab bo'lmadi")
-            else:
-                logger.warning("[API] InnerTube dan URL ajratib bo'lmadi (cipher kerak)")
-        else:
-            logger.info(f"[API] InnerTube ishlamadi ({time.time()-start_time:.1f}s), keyingi usul...")
-
-    # 3: INVIDIOUS PROXY DOWNLOAD
-    elapsed = time.time() - start_time
-    if elapsed < 25:
-        logger.info("[API] 3-usul: Invidious proxy orqali yuklanmoqda...")
-        inv_proxy_result = await _try_invidious_proxy_download(video_id, quality, audio_only)
-        if inv_proxy_result:
-            logger.info(f"[API] Invidious proxy MUVOFAQIYATLI ({time.time()-start_time:.1f}s)")
-            return inv_proxy_result
-    else:
-        logger.info("[API] 3-usul o'tkazib yuborildi (vaqt tugadi)")
-
-    # 4: INVIDIOUS API
-    elapsed = time.time() - start_time
-    if elapsed < 25:
-        logger.info("[API] 4-usul: Invidious orqali yuklanmoqda...")
-        inv_result = await _try_invidious(video_id, fast_only=True)
-        if inv_result:
-            download_url, file_ext = _find_best_invidious_download(inv_result["data"], quality, audio_only)
-            if download_url:
-                result = await _download_from_url(download_url, video_id, audio_only, file_ext)
-                if result:
-                    info = convert_api_info_to_ytdlp(inv_result)
-                    logger.info(f"[API] Invidious MUVOFAQIYATLI ({time.time()-start_time:.1f}s)")
-                    return result, info
-    else:
-        logger.info("[API] 4-usul o'tkazib yuborildi (vaqt tugadi)")
-
-    # 5: PIPED
-    elapsed = time.time() - start_time
-    if elapsed < 25:
-        logger.info("[API] 5-usul: Piped orqali yuklanmoqda...")
-        piped_result = await _try_piped(video_id, fast_only=True)
-        if piped_result:
-            download_url, file_ext = _find_best_piped_download(piped_result["data"], quality, audio_only)
-            if download_url:
-                result = await _download_from_url(download_url, video_id, audio_only, file_ext)
-                if result:
-                    info = convert_api_info_to_ytdlp(piped_result)
-                    logger.info(f"[API] Piped MUVOFAQIYATLI ({time.time()-start_time:.1f}s)")
-                    return result, info
-    else:
-        logger.info("[API] 5-usul o'tkazib yuborildi (vaqt tugadi)")
 
     total_time = time.time() - start_time
     logger.error(f"[API] Barcha yuklash usullari muvaffaqiyatsiz ({total_time:.1f}s)")

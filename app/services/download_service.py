@@ -1,4 +1,3 @@
-
 import logging
 import os
 from datetime import datetime
@@ -44,7 +43,7 @@ class DownloadService:
         if platform == "youtube":
             # YouTube uchun youtube_api.py ishlatamiz
             try:
-                import youtube_api
+                from app.utils import youtube_api
                 api_result = await youtube_api.get_youtube_info_via_api(url)
 
                 if api_result:
@@ -161,7 +160,7 @@ class DownloadService:
         if platform == "youtube":
             # YouTube uchun youtube_api.py ishlatamiz
             try:
-                import youtube_api
+                from app.utils import youtube_api
                 result = await youtube_api.download_youtube_via_api(
                     url, quality_num, audio_only
                 )
