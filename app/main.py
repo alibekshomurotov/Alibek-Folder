@@ -1,4 +1,3 @@
-"""Video Downloader Pro - Main Entry Point"""
 
 import asyncio
 import logging
@@ -56,7 +55,7 @@ async def _dummy_http_server():
             self.wfile.write(b"Bot is running")
 
         def log_message(self, format, *args):
-            pass
+            pass  # Log spam yo'q
 
     try:
         httpd = socketserver.TCPServer(("", port), Handler)
@@ -71,17 +70,22 @@ async def main():
     """Main function to start the bot"""
     global _bot
 
+    # Validate config
     if not config.bot.token:
-        logger.error("BOT_TOKEN is not set!")
+        logger.error("BOT_TOKEN is not set! Please set it in .env file or environment variables.")
         sys.exit(1)
 
+    # Initialize database
     logger.info("Initializing database...")
     await init_db()
     logger.info("Database initialized.")
 
+    # Create bot and dispatcher
     _bot = Bot(
         token=config.bot.token,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+        default=DefaultBotProperties(
+            parse_mode=ParseMode.HTML,
+        ),
     )
 
     dp = Dispatcher()
@@ -98,25 +102,27 @@ async def main():
     dp.message.middleware(LoggingMiddleware())
     dp.callback_query.middleware(LoggingMiddleware())
 
-    # Register handlers — premium_router O'CHIRILDI
+    # Register handlers — tartib muhim: start > admin > cancel > profile > video
+    # Admin router video router oldin bo'lishi kerak ("🔧 Admin panel" tugmasi uchun)
     from app.handlers.start import router as start_router
-    from app.handlers.video import router as video_router
-    from app.handlers.profile import router as profile_router
     from app.handlers.admin import router as admin_router
     from app.handlers.callback_cancel import router as cancel_router
+    from app.handlers.profile import router as profile_router
+    from app.handlers.video import router as video_router
 
     dp.include_router(start_router)
-    dp.include_router(video_router)
-    dp.include_router(profile_router)
     dp.include_router(admin_router)
     dp.include_router(cancel_router)
+    dp.include_router(profile_router)
+    dp.include_router(video_router)
 
     logger.info("Starting Video Downloader Pro bot...")
 
+    # Check FFmpeg
     if config.download.ffmpeg_available:
         logger.info("FFmpeg detected - full quality support enabled")
     else:
-        logger.warning("FFmpeg not found - limited quality support")
+        logger.warning("FFmpeg not found - limited quality support (pre-merged formats only)")
 
     # Signal handling
     loop = asyncio.get_running_loop()

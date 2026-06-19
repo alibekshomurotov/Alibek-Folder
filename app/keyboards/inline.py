@@ -1,10 +1,8 @@
-"""Inline Keyboards"""
-
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 
 def main_menu_kb() -> InlineKeyboardMarkup:
-    """Start xabari ostidagi inline tugma — faqat Profil."""
+    """Start xabari ostidagi inline tugma - faqat Profil."""
     kb = [[
         InlineKeyboardButton(text="👤 Profil", callback_data="profile")
     ]]
@@ -35,40 +33,18 @@ def cancel_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
-def quality_select_kb(video_id: str, qualities: list = None) -> InlineKeyboardMarkup:
-    """Video sifat tanlash klaviaturasi."""
-    if qualities is None:
-        qualities = ["1080p", "720p", "480p", "360p"]
-
-    kb = []
-    row = []
-    for q in qualities:
-        row.append(InlineKeyboardButton(
-            text=f"🎥 {q.upper()}",
-            callback_data=f"quality_{video_id}_{q}",
-        ))
-        if len(row) == 2:
-            kb.append(row)
-            row = []
-
-    # MP3 tugma
-    kb.append([InlineKeyboardButton(
-        text="🎵 Audio MP3",
-        callback_data=f"quality_{video_id}_mp3",
-    )])
-    # Bekor qilish
-    kb.append([InlineKeyboardButton(
-        text="❌ Bekor qilish",
-        callback_data="cancel_download",
-    )])
-
+def subscription_check_kb(channels: list) -> InlineKeyboardMarkup:
+    """Obuna tekshirish tugmasi (auth middleware uchun)."""
+    kb = [[
+        InlineKeyboardButton(text="✅ Obunani tekshirish", callback_data="check_subscription")
+    ]]
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
 # ============ Admin Keyboards ============
 
 def admin_menu_kb() -> InlineKeyboardMarkup:
-    """Admin panel inline menyu — Promo va Premium O'CHIRILDI."""
+    """Admin panel inline menyu."""
     kb = [
         [
             InlineKeyboardButton(text="📊 Statistika", callback_data="admin_stats"),
