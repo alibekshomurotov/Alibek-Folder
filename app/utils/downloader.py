@@ -310,11 +310,12 @@ def _build_base_opts(use_cookies: bool = True, platform: str = "youtube") -> Dic
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
-        "socket_timeout": 8,
-        "retries": 1,
-        "fragment_retries": 1,
-        "file_access_retries": 1,
-        "throttledratelimit": 0,
+        # === Tuzatildi: 8 → 120 (YouTube API timeout oldini olish) ===
+        "socket_timeout": 120,
+        "retries": 5,
+        "fragment_retries": 10,
+        "file_access_retries": 5,
+        "throttledratelimit": 100000,
         "concurrent_fragment_downloads": 8,
         "buffersize": 16384,
         "http_chunk_size": 10485760,
@@ -878,7 +879,8 @@ async def _extract_youtube_info(url: str) -> Optional[Dict[str, Any]]:
                 "noplaylist": True,
                 "geo_bypass": "US",
                 "geo_bypass_country": "US",
-                "socket_timeout": 8,
+                # === Tuzatildi: 8 → 120 ===
+                "socket_timeout": 120,
             }
 
             # PO Token
@@ -1077,12 +1079,15 @@ async def _download_youtube(url: str, quality: str = "720",
     for i, (label, extractor_args) in enumerate(player_clients):
         use_cookies = "cookies" in label
         try:
-            logger.info(f"[YouTube] yt-dlp yuklash {i+1}/{len(player_clients)}: {label} (proxy: bor)")
+            proxy = _get_youtube_proxy()
+            proxy_status = "bor" if proxy else "yo'q"
+            logger.info(f"[YouTube] yt-dlp yuklash {i+1}/{len(player_clients)}: {label} (proxy: {proxy_status})")
 
             opts = _build_download_opts(output_path, quality, audio_only, use_cookies, "best", "youtube")
             opts["geo_bypass"] = "US"
             opts["geo_bypass_country"] = "US"
-            opts["socket_timeout"] = 8
+            # === Tuzatildi: 8 → 120 ===
+            opts["socket_timeout"] = 120
 
             # PO Token qo'shish
             if po_token:
@@ -1172,7 +1177,8 @@ async def _download_non_youtube(url: str, quality: str, audio_only: bool) -> Opt
             try:
                 opts = _build_download_opts(output_path, quality, audio_only, True, "best", "instagram")
                 opts["extractor_args"] = {"instagram": {"api": ["graphql"]}}
-                opts["socket_timeout"] = 8
+                # === Tuzatildi: 8 → 120 ===
+                opts["socket_timeout"] = 120
 
                 logger.info(f"[{platform}] Story: yt-dlp fallback...")
 
@@ -1218,7 +1224,8 @@ async def _download_non_youtube(url: str, quality: str, audio_only: bool) -> Opt
     for i, (use_cookies, fmt_override) in enumerate(attempts, 1):
         try:
             opts = _build_download_opts(output_path, quality, audio_only, use_cookies, fmt_override, platform)
-            opts["socket_timeout"] = 8
+            # === Tuzatildi: 8 → 120 ===
+            opts["socket_timeout"] = 120
 
             label = "cookies" if use_cookies else "cookiesiz"
             logger.info(f"[{platform}] Yuklash {i}/{len(attempts)}: {label}")
@@ -1303,7 +1310,6 @@ def format_duration(seconds: int) -> str:
         return f"{hours}:{minutes:02d}:{secs:02d}"
     return f"{minutes}:{secs:02d}"
 
-
 def format_file_size(size_bytes: float) -> str:
     if not size_bytes:
         return "N/A"
@@ -1312,7 +1318,6 @@ def format_file_size(size_bytes: float) -> str:
             return f"{size_bytes:.1f} {unit}"
         size_bytes /= 1024
     return f"{size_bytes:.1f} TB"
-
 
 def format_view_count(count: int) -> str:
     if not count:

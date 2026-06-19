@@ -1,3 +1,5 @@
+"""Video Handler — Stiker animatsiya + video yuklash"""
+
 import asyncio
 import hashlib
 import logging
@@ -13,10 +15,7 @@ from app.database.connection import get_session_factory
 from app.database.repositories.user_repo import UserRepository
 from app.services.download_service import DownloadService
 from app.keyboards.inline import video_result_kb
-from app.utils.downloader import (
-    detect_platform, is_video_url,
-    cleanup_file,
-)
+from app.utils.downloader import is_video_url, cleanup_file
 from app.utils.formatter import format_error
 
 logger = logging.getLogger(__name__)
@@ -26,7 +25,7 @@ router = Router()
 # MP3 uchun URL cache
 _url_cache: Dict[str, str] = {}
 
-# Avtomatik topilgan stikerlar (startup da to'ldiriladi)
+# Stikerlar (startup da to'ldiriladi)
 _hourglass_stickers: List[str] = []
 
 
@@ -37,19 +36,19 @@ def _cache_url(url: str) -> str:
 
 
 async def load_hourglass_stickers(bot: Bot):
-    """Bot ishga tushganda hourglass stikerlarni avtomatik topish."""
+    """Bot ishga tushganda stikerlarni yuklash."""
     global _hourglass_stickers
 
-    # 1-sinov: env var dan o'qish (admin qo'lda berishi mumkin)
+    # 1-prioritet: env var (admin Render'da qo'ygan HOURGLASS_STICKERS)
     env_stickers = os.getenv("HOURGLASS_STICKERS", "")
     if env_stickers:
         ids = [s.strip() for s in env_stickers.split(",") if s.strip()]
         if ids:
             _hourglass_stickers = ids
-            logger.info(f"Hourglass stickers loaded from env ({len(ids)} ta)")
+            logger.info(f"✅ Stikerlar env dan yuklandi ({len(ids)} ta)")
             return
 
-    # 2-sinov: Telegram'dagi mashhur stiker setlarini qidirish
+    # 2-prioritet: Telegram stiker setlarini qidirish
     sets_to_try = [
         "hourglass_animated",
         "loadinganimation",
@@ -65,19 +64,44 @@ async def load_hourglass_stickers(bot: Bot):
             animated = [s.file_id for s in sticker_set.stickers if s.is_animated]
             if animated:
                 _hourglass_stickers = animated[:4]
-                logger.info(f"Hourglass stickers found in '{set_name}' ({len(animated)} ta)")
+                logger.info(f"✅ Stikerlar '{set_name}' dan topildi ({len(animated)} ta)")
                 return
         except Exception:
             continue
 
-    logger.info("No hourglass sticker set found, using text animation fallback")
+    logger.warning("⚠️ Hech qanday stiker topilmadi, matn animatsiya ishlatiladi")
 
 
-async def _animate_sticker(bot: Bot, sticker_msg, stop_event: asyncio.Event):
-    """Stiker animatsiyasi — aylanib turadi."""
+async def _animate_sticker(bot: Bot, chat_id: int, message_id: int, stop_event: asyncio.Event):
+    """Stiker animatsiyasi — bir nechta stiker bo'lsa almashtirib turadi."""
     if not _hourglass_stickers:
         return
 
+    # Agar faqat 1 stiker bo'lsa — o'chirib qayta yuborib animatsiyani takrorlaymiz
+    if len(_hourglass_stickers) == 1:
+        sticker_id = _hourglass_stickers[0]
+        try:
+            while not stop_event.is_set():
+                await asyncio.sleep(3.0)
+                if stop_event.is_set():
+                    break
+                # Eski stikerni o'chirish
+                try:
+                    await bot.delete_message(chat_id=chat_id, message_id=message_id)
+                except Exception:
+                    return
+                # Yangi stiker yuborish (animatsiya qayta boshlanadi)
+                if not stop_event.is_set():
+                    try:
+                        new_msg = await bot.send_sticker(chat_id, sticker_id)
+                        message_id = new_msg.message_id
+                    except Exception:
+                        return
+        except asyncio.CancelledError:
+            pass
+        return
+
+    # Ko'p stiker bo'lsa — edit_message_media bilan almashtirish
     idx = 0
     try:
         while not stop_event.is_set():
@@ -85,8 +109,8 @@ async def _animate_sticker(bot: Bot, sticker_msg, stop_event: asyncio.Event):
             idx = (idx + 1) % len(_hourglass_stickers)
             try:
                 await bot.edit_message_media(
-                    chat_id=sticker_msg.chat.id,
-                    message_id=sticker_msg.message_id,
+                    chat_id=chat_id,
+                    message_id=message_id,
                     media={"type": "sticker", "media": _hourglass_stickers[idx]},
                 )
             except Exception:
@@ -125,8 +149,8 @@ async def _animate_text(bot: Bot, chat_id: int, message_id: int, stop_event: asy
         pass
 
 
-async def _start_animation(bot, chat_id: int):
-    """Animatsiya boshlash — stiker bo'lsa stiker, yo'qsa matn."""
+async def _start_animation(bot: Bot, chat_id: int):
+    """Animatsiya boshlash — stiker yoki matn."""
     stop_event = asyncio.Event()
     task = None
     msg = None
@@ -134,21 +158,25 @@ async def _start_animation(bot, chat_id: int):
     if _hourglass_stickers:
         try:
             msg = await bot.send_sticker(chat_id, _hourglass_stickers[0])
-            task = asyncio.create_task(_animate_sticker(bot, msg, stop_event))
-        except Exception:
-            msg = None
+            logger.info(f"⏳ Stiker yuborildi (chat_id={chat_id}, stickers={len(_hourglass_stickers)} ta)")
+            task = asyncio.create_task(
+                _animate_sticker(bot, chat_id, msg.message_id, stop_event)
+            )
+            return stop_event, task, msg
+        except Exception as e:
+            logger.warning(f"Stiker yuborish xatosi: {e}, matn animatsiyaga o'tish")
 
-    if msg is None:
-        try:
-            msg = await bot.send_message(chat_id, "⏳ Video yuklanmoqda . . .")
-            task = asyncio.create_task(_animate_text(bot, chat_id, msg.message_id, stop_event))
-        except Exception:
-            pass
+    # Fallback: matn animatsiya
+    try:
+        msg = await bot.send_message(chat_id, "⏳ Video yuklanmoqda . . .")
+        task = asyncio.create_task(_animate_text(bot, chat_id, msg.message_id, stop_event))
+    except Exception:
+        pass
 
     return stop_event, task, msg
 
 
-async def _stop_animation(bot, stop_event, task, msg):
+async def _stop_animation(bot: Bot, stop_event, task, msg):
     """Animatsiyani to'xtatib xabarni o'chirish."""
     stop_event.set()
     if task:
@@ -166,7 +194,7 @@ async def _stop_animation(bot, stop_event, task, msg):
 
 @router.message(F.text)
 async def handle_video_link(message: Message, state: FSMContext):
-    """Link yuborilsa: animatsiya -> video."""
+    """Link yuborilsa: stiker animatsiya → video."""
     from app.utils.helpers import extract_url_from_text as extract_url
 
     url = extract_url(message.text or "")
@@ -260,7 +288,6 @@ async def handle_mp3_download(callback: CallbackQuery, state: FSMContext):
 
     await callback.answer("MP3 yuklanmoqda...")
 
-    # Animatsiya boshlash
     stop_event, anim_task, anim_msg = await _start_animation(
         callback.bot, callback.message.chat.id
     )

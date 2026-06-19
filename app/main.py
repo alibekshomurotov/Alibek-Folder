@@ -1,3 +1,5 @@
+"""Video Downloader Pro - Main Entry Point"""
+
 import asyncio
 import logging
 import os
@@ -61,9 +63,13 @@ async def _dummy_http_server():
         def log_message(self, format, *args):
             pass  # Log spam yo'q
 
+    class ReusableTCPServer(socketserver.TCPServer):
+        allow_reuse_address = True
+        allow_reuse_port = True
+
     try:
-        httpd = socketserver.TCPServer(("", port), Handler)
-        logger.info(f"Dummy HTTP server port {port} da (Render health check)")
+        httpd = ReusableTCPServer(("", port), Handler)
+        logger.info(f"✅ HTTP server port {port} da ishga tushdi (Render health check)")
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, httpd.serve_forever)
     except Exception as e:
