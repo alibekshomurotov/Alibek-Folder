@@ -3,24 +3,22 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 
-def main_menu_kb() -> InlineKeyboardMarkup:
-    """Start xabari ostidagi inline tugma - faqat Profil."""
+def main_menu_kb(user_id: int = 0) -> InlineKeyboardMarkup:
+    """Start xabari ostidagi inline tugma. Admin uchun yashirin Admin panel tugmasi."""
+    from app.config import config
     kb = [[
         InlineKeyboardButton(text="👤 Profil", callback_data="profile")
     ]]
+    if config.bot.is_admin(user_id):
+        kb.append([InlineKeyboardButton(text="🔧", callback_data="admin_panel_open")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
 def video_result_kb(cache_key: str) -> InlineKeyboardMarkup:
-    """Video ostidagi tugmalar: MP3 + Profil bir xabarda."""
-    kb = [
-        [
-            InlineKeyboardButton(text="🎵 MP3 yuklash", callback_data=f"mp3_{cache_key}"),
-        ],
-        [
-            InlineKeyboardButton(text="👤 Profil", callback_data="profile"),
-        ],
-    ]
+    """Video ostidagi tugma: faqat MP3."""
+    kb = [[
+        InlineKeyboardButton(text="🎵 MP3 yuklash", callback_data=f"mp3_{cache_key}"),
+    ]]
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
@@ -129,4 +127,4 @@ def admin_back_kb() -> InlineKeyboardMarkup:
     kb = [[
         InlineKeyboardButton(text="🔙 Admin panel", callback_data="admin_back"),
     ]]
-    return InlineKeyboardMarkup(inline_keyboard=kb) 
+    return InlineKeyboardMarkup(inline_keyboard=kb)

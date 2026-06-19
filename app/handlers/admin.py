@@ -1,3 +1,5 @@
+"""Admin Handler - Admin panel with all management features"""
+
 import logging
 import os
 
@@ -35,9 +37,24 @@ def is_admin(user_id: int) -> bool:
 
 # ============ Admin Menu ============
 
+@router.callback_query(F.data == "admin_panel_open")
+async def admin_panel_open(callback: CallbackQuery, state: FSMContext):
+    """Admin panel inline tugma orqali (hech qanday qo'shimcha xabar yo'q)."""
+    if not is_admin(callback.from_user.id):
+        await callback.answer()
+        return
+    await state.clear()
+    text = f"🔧 {bold('Admin Panel')}\n\nBo'limni tanlang:"
+    try:
+        await callback.message.edit_text(text, reply_markup=admin_menu_kb(), parse_mode="HTML")
+    except Exception:
+        await callback.message.answer(text, reply_markup=admin_menu_kb(), parse_mode="HTML")
+    await callback.answer()
+
+
 @router.message(F.text == "🔧 Admin panel")
 async def cmd_admin(message: Message, state: FSMContext):
-    """Admin panel tugmasi bosilganda (reply keyboard)."""
+    """Admin panel tugmasi bosilganda (reply keyboard — eskicha)."""
     if not is_admin(message.from_user.id):
         return
 
@@ -87,7 +104,6 @@ async def admin_stats(callback: CallbackQuery):
         logger.error(f"Stats error: {e}")
         stats = {}
 
-    # Barcha kerakli kalitlar borligini ta'minlash (crash oldini olish)
     stats.setdefault("total_users", 0)
     stats.setdefault("today_users", 0)
     stats.setdefault("total_downloads", 0)
@@ -113,7 +129,6 @@ async def admin_users(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         return
 
-    # BARCHA foydalanuvchilarni olish (10000 gacha)
     users = await AdminService.get_users(limit=10000, offset=0)
 
     if not users:
@@ -139,7 +154,6 @@ async def admin_users(callback: CallbackQuery):
     try:
         await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     except Exception:
-        # Xabar juda uzun bo'lishi mumkin — alohida xabar sifatida
         await callback.message.answer(text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
@@ -452,7 +466,7 @@ async def admin_channel_add(callback: CallbackQuery, state: FSMContext):
         return
 
     await state.set_state(AdminStates.channel_type)
-    text = f"📺 {bold('Kanal qoshish')}\n\nKanal turini tanlang:"
+    text = f"📺 {bold('Kanal qo\\shish')}\n\nKanal turini tanlang:"
     try:
         await callback.message.edit_text(text, reply_markup=channel_type_select_kb(), parse_mode="HTML")
     except Exception:
@@ -472,7 +486,7 @@ async def process_channel_type(callback: CallbackQuery, state: FSMContext):
     channel_emoji = CHANNEL_TYPES.get(channel_type, CHANNEL_TYPES["other"])["emoji"]
 
     text = (
-        f"📺 {bold(f'Kanal qoshish — {channel_emoji} {channel_name}')}\n\n"
+        f"📺 {bold(f'Kanal qo\\shish — {channel_emoji} {channel_name}')}\n\n"
         f"{hint}"
     )
     try:
@@ -489,7 +503,6 @@ async def process_channel_link(message: Message, state: FSMContext):
     data = await state.get_data()
     channel_type = data.get("channel_type", "telegram")
 
-    # For Telegram channels, try to resolve channel ID
     channel_id = None
     if channel_type == "telegram":
         from app.utils.helpers import parse_telegram_channel_id
@@ -500,7 +513,6 @@ async def process_channel_link(message: Message, state: FSMContext):
             )
             return
 
-        # Try to get channel info
         try:
             chat = await message.bot.get_chat(channel_id)
             channel_name = chat.title
@@ -510,7 +522,6 @@ async def process_channel_link(message: Message, state: FSMContext):
     else:
         channel_name = link
 
-    # Add channel to database
     await SubscriptionService.add_channel(
         channel_link=link,
         channel_name=channel_name,
@@ -548,7 +559,7 @@ async def admin_channel_remove(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
 
-    text = f"🗑 {bold('Kanal ochirish')}\n\nO'chirish uchun kanalni tanlang:"
+    text = f"🗑 {bold('Kanal o\\chirish')}\n\nO'chirish uchun kanalni tanlang:"
     kb = channel_list_kb(channels)
     try:
         await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
@@ -590,11 +601,11 @@ async def admin_settings(callback: CallbackQuery, state: FSMContext):
     text = (
         f"⚙ {bold('Sozlamalar')}\n\n"
         f"{separator()}\n\n"
-        f"{info_line('FFmpeg', '✅ Mavjud' if config.download.ffmpeg_available else '❌ Yoq')}\n"
+        f"{info_line('FFmpeg', '✅ Mavjud' if config.download.ffmpeg_available else '❌ Yo\\q')}\n"
         f"{info_line('Max fayl hajmi', f'{config.download.max_file_size_mb} MB')}\n"
         f"{info_line('Default sifat', f'{config.download.default_quality}p')}\n"
         f"{info_line('Rate limit', f'{config.rate_limit.downloads}/{config.rate_limit.period}s')}\n"
-        f"{info_line('Cookie fayl', '✅ Mavjud' if os.path.exists(config.download.cookies_file) else '❌ Yoq')}\n"
+        f"{info_line('Cookie fayl', '✅ Mavjud' if os.path.exists(config.download.cookies_file) else '❌ Yo\\q')}\n"
     )
     kb = admin_back_kb()
     try:

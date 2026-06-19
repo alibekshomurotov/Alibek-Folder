@@ -11,8 +11,6 @@ from aiogram.types import Message, CallbackQuery, FSInputFile
 from aiogram.fsm.context import FSMContext
 
 from app.config import config
-from app.database.connection import get_session_factory
-from app.database.repositories.user_repo import UserRepository
 from app.services.download_service import DownloadService
 from app.keyboards.inline import video_result_kb
 from app.utils.downloader import is_video_url, cleanup_file
@@ -22,11 +20,25 @@ logger = logging.getLogger(__name__)
 
 router = Router()
 
-# MP3 uchun URL cache
 _url_cache: Dict[str, str] = {}
-
-# Stikerlar (startup da to'ldiriladi)
 _hourglass_stickers: List[str] = []
+
+
+async def _register_user_bg(user_id: int, username: str, first_name: str):
+    """Foydalanuvchini background'da ro'yxatdan o'tkazish."""
+    try:
+        from app.database.connection import get_session_factory
+        from app.database.repositories.user_repo import UserRepository
+        session_factory = await get_session_factory()
+        async with session_factory() as session:
+            user_repo = UserRepository(session)
+            await user_repo.get_or_create(
+                user_id=user_id,
+                username=username,
+                first_name=first_name,
+            )
+    except Exception as e:
+        logger.error(f"User register bg error: {e}")
 
 
 def _cache_url(url: str) -> str:
@@ -51,7 +63,6 @@ async def load_hourglass_stickers(bot: Bot):
     """Bot ishga tushganda stikerlarni yuklash."""
     global _hourglass_stickers
 
-    # 1-prioritet: env var (admin Render'da qo'ygan HOURGLASS_STICKERS)
     env_stickers = os.getenv("HOURGLASS_STICKERS", "")
     if env_stickers:
         ids = [s.strip() for s in env_stickers.split(",") if s.strip()]
@@ -70,7 +81,6 @@ async def load_hourglass_stickers(bot: Bot):
                 logger.error(f"❌ HOURGLASS_STICKERS da {len(ids)} ta file_id bor, lekin HECH biri stiker emas!")
                 logger.error(f"❌ Iltimos, ANIMATED WEBP stiker file_id ni yuboring")
 
-    # 2-prioritet: Telegram stiker setlarini qidirish
     sets_to_try = [
         "hourglass_animated",
         "loadinganimation",
@@ -221,20 +231,14 @@ async def handle_video_link(message: Message, state: FSMContext):
     if not is_video_url(url):
         return
 
-    # Foydalanuvchini ro'yxatdan o'tkazish
-    try:
-        session_factory = await get_session_factory()
-        async with session_factory() as session:
-            user_repo = UserRepository(session)
-            await user_repo.get_or_create(
-                user_id=message.from_user.id,
-                username=message.from_user.username,
-                first_name=message.from_user.first_name,
-            )
-    except Exception as e:
-        logger.error(f"User register error: {e}")
+    asyncio.create_task(
+        _register_user_bg(
+            message.from_user.id,
+            message.from_user.username,
+            message.from_user.first_name,
+        )
+    )
 
-    # Animatsiya boshlash
     stop_event, anim_task, anim_msg = await _start_animation(message.bot, message.chat.id)
 
     try:
@@ -245,7 +249,6 @@ async def handle_video_link(message: Message, state: FSMContext):
             user_id=message.from_user.id,
         )
 
-        # Animatsiyani to'xtatib o'chirish
         await _stop_animation(message.bot, stop_event, anim_task, anim_msg)
 
         if result is None:
