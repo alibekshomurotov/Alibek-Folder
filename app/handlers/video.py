@@ -1,4 +1,4 @@
-"""Video Handler - Video download processing (simplified: auto download + MP3 button)"""
+"""Video Handler - Video download processing (simplified: auto download + MP3 + Profil)"""
 
 import asyncio
 import hashlib
@@ -14,7 +14,7 @@ from app.config import config
 from app.database.connection import get_session_factory
 from app.database.repositories.user_repo import UserRepository
 from app.services.download_service import DownloadService
-from app.keyboards.inline import mp3_download_kb
+from app.keyboards.inline import video_result_kb
 from app.utils.downloader import (
     detect_platform, is_video_url,
     cleanup_file,
@@ -28,7 +28,7 @@ router = Router()
 # MP3 uchun URL cache (callback_data 64 byte limit)
 _url_cache: Dict[str, str] = {}
 
-# Hourglass sticker file ID lari (o'zingiznikiga almashtiring)
+# Qum soat stikerlari (o'zingiznikiga almashtiring)
 _HOURGLASS_STICKERS = [
     "CAACAgIAAxkBAAIKbmZ85pKLMdqjGsMCWfNX-TRxNF7uAAIeAAPANk8TBPbxr4aSKSQeBA",
     "CAACAgIAAxkBAAIKb2Z85qKOMC1R9mvYEkCs_MDSZgvfAAIhAAPANk8TBGdB2YUflEgeBA",
@@ -46,7 +46,7 @@ def _cache_url(url: str) -> str:
 
 @router.message(F.text)
 async def handle_video_link(message: Message, state: FSMContext):
-    """Handle video link messages - auto download best quality, only video + MP3 button."""
+    """Link yuborilsa: qum soat stikeri aylanadi -> video + MP3 + Profil tugmalar bir xabarda."""
     from app.utils.helpers import extract_url_from_text as extract_url
 
     url = extract_url(message.text or "")
@@ -70,7 +70,7 @@ async def handle_video_link(message: Message, state: FSMContext):
     except Exception as e:
         logger.error(f"User register error: {e}")
 
-    # Hourglass sticker animatsiyasi
+    # Qum soat stikeri + animatsiya boshlash
     sticker_msg = None
     animation_task = None
     if _HOURGLASS_STICKERS:
@@ -83,7 +83,7 @@ async def handle_video_link(message: Message, state: FSMContext):
             logger.warning(f"Sticker send failed: {e}")
 
     try:
-        # AVTOMATIK yuklash — sifat tanlash yo'q
+        # AVTOMATIK yuklash
         result = await DownloadService.download(
             url=url,
             quality="720p",
@@ -91,7 +91,7 @@ async def handle_video_link(message: Message, state: FSMContext):
             user_id=message.from_user.id,
         )
 
-        # Animatsiyani to'xtatish
+        # Qum soatni to'xtatish va o'chirish
         if animation_task:
             animation_task.cancel()
         if sticker_msg:
@@ -106,34 +106,32 @@ async def handle_video_link(message: Message, state: FSMContext):
 
         file_path = result["file_path"]
         file_size_mb = result["file_size_mb"]
-        caption = "🤖 @UzVideoSaveBot"
+        caption = "@UzVideoSaveBot"
 
-        # MP3 tugmasi uchun cache key
+        # Video + MP3 + Profil bir xabarda
         cache_key = _cache_url(url)
-        mp3_kb = mp3_download_kb(cache_key)
+        kb = video_result_kb(cache_key)
 
-        # Video yuborish
         try:
             if file_size_mb > config.download.max_file_size_mb:
                 await message.answer_document(
                     document=FSInputFile(file_path),
                     caption=caption,
+                    reply_markup=kb,
                 )
             else:
                 try:
                     await message.answer_video(
                         video=FSInputFile(file_path),
                         caption=caption,
+                        reply_markup=kb,
                     )
                 except Exception:
                     await message.answer_document(
                         document=FSInputFile(file_path),
                         caption=caption,
+                        reply_markup=kb,
                     )
-
-            # MP3 tugmasi — video ostida
-            await message.answer("🎵 Audio versiyasini yuklash:", reply_markup=mp3_kb)
-
         except Exception as e:
             logger.error(f"Error sending file: {e}")
             await message.answer(format_error("server_error"), parse_mode="HTML")
@@ -165,13 +163,17 @@ async def handle_mp3_download(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Sessiya tugadi. Qayta link yuboring.", show_alert=True)
         return
 
-    await callback.answer("🎵 MP3 yuklanmoqda...")
+    await callback.answer("MP3 yuklanmoqda...")
 
-    # Hourglass sticker
+    # Qum soat stikeri
     sticker_msg = None
+    animation_task = None
     if _HOURGLASS_STICKERS:
         try:
             sticker_msg = await callback.message.answer_sticker(_HOURGLASS_STICKERS[0])
+            animation_task = asyncio.create_task(
+                _animate_hourglass(callback.bot, sticker_msg)
+            )
         except Exception:
             pass
 
@@ -183,6 +185,9 @@ async def handle_mp3_download(callback: CallbackQuery, state: FSMContext):
             user_id=callback.from_user.id,
         )
 
+        # Qum soatni to'xtatish va o'chirish
+        if animation_task:
+            animation_task.cancel()
         if sticker_msg:
             try:
                 await sticker_msg.delete()
@@ -197,12 +202,14 @@ async def handle_mp3_download(callback: CallbackQuery, state: FSMContext):
 
         await callback.message.answer_audio(
             audio=FSInputFile(file_path),
-            caption="🤖 @UzVideoSaveBot",
+            caption="@UzVideoSaveBot",
         )
 
         cleanup_file(file_path)
 
     except Exception as e:
+        if animation_task:
+            animation_task.cancel()
         if sticker_msg:
             try:
                 await sticker_msg.delete()
@@ -215,7 +222,7 @@ async def handle_mp3_download(callback: CallbackQuery, state: FSMContext):
 
 
 async def _animate_hourglass(bot: Bot, sticker_msg):
-    """Hourglass sticker animatsiyasi."""
+    """Qum soat stikeri animatsiyasi — video tayyor bo'lguncha aylanib turadi."""
     if not _HOURGLASS_STICKERS:
         return
 

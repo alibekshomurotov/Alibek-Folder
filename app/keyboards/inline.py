@@ -1,3 +1,5 @@
+"""Inline Keyboards"""
+
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 
@@ -9,11 +11,16 @@ def main_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
-def mp3_download_kb(cache_key: str) -> InlineKeyboardMarkup:
-    """Video ostidagi MP3 yuklash tugmasi (cache_key orqali)."""
-    kb = [[
-        InlineKeyboardButton(text="🎵 MP3 yuklash", callback_data=f"mp3_{cache_key}")
-    ]]
+def video_result_kb(cache_key: str) -> InlineKeyboardMarkup:
+    """Video ostidagi tugmalar: MP3 + Profil bir xabarda."""
+    kb = [
+        [
+            InlineKeyboardButton(text="🎵 MP3 yuklash", callback_data=f"mp3_{cache_key}"),
+        ],
+        [
+            InlineKeyboardButton(text="👤 Profil", callback_data="profile"),
+        ],
+    ]
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
@@ -122,4 +129,4 @@ def admin_back_kb() -> InlineKeyboardMarkup:
     kb = [[
         InlineKeyboardButton(text="🔙 Admin panel", callback_data="admin_back"),
     ]]
-    return InlineKeyboardMarkup(inline_keyboard=kb)
+    return InlineKeyboardMarkup(inline_keyboard=kb) 

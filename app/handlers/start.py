@@ -67,7 +67,7 @@ async def cmd_start(message: Message, state: FSMContext):
     await message.answer(text, reply_markup=inline_kb, parse_mode="HTML")
     # Admin reply keyboard alohida (Telegram cheklovi: inline va reply bir xabarda bo'la olmaydi)
     if is_admin:
-        await message.answer(".", reply_markup=reply_kb)
+        await message.answer("", reply_markup=reply_kb)
 
 
 @router.callback_query(F.data == "back_main")
