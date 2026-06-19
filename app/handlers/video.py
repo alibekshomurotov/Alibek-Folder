@@ -35,6 +35,18 @@ def _cache_url(url: str) -> str:
     return url_hash
 
 
+async def _validate_sticker(bot: Bot, file_id: str) -> bool:
+    """Stiker file_id ni tekshirish — haqiqiy stiker ekanligini tasdiqlash."""
+    try:
+        file = await bot.get_file(file_id)
+        if file.file_path and (file.file_path.endswith('.webp') or file.file_path.endswith('.tgs')):
+            return True
+        return False
+    except Exception as e:
+        logger.debug(f"Stiker tekshirish xatosi: {e}")
+        return False
+
+
 async def load_hourglass_stickers(bot: Bot):
     """Bot ishga tushganda stikerlarni yuklash."""
     global _hourglass_stickers
@@ -44,9 +56,19 @@ async def load_hourglass_stickers(bot: Bot):
     if env_stickers:
         ids = [s.strip() for s in env_stickers.split(",") if s.strip()]
         if ids:
-            _hourglass_stickers = ids
-            logger.info(f"✅ Stikerlar env dan yuklandi ({len(ids)} ta)")
-            return
+            valid_ids = []
+            for sid in ids:
+                if await _validate_sticker(bot, sid):
+                    valid_ids.append(sid)
+                else:
+                    logger.warning(f"⚠️ Stiker '{sid[:20]}...' NOTO'G'RI — bu stiker emas")
+            if valid_ids:
+                _hourglass_stickers = valid_ids
+                logger.info(f"✅ Stikerlar env dan yuklandi ({len(valid_ids)}/{len(ids)} ta to'g'ri)")
+                return
+            else:
+                logger.error(f"❌ HOURGLASS_STICKERS da {len(ids)} ta file_id bor, lekin HECH biri stiker emas!")
+                logger.error(f"❌ Iltimos, ANIMATED WEBP stiker file_id ni yuboring")
 
     # 2-prioritet: Telegram stiker setlarini qidirish
     sets_to_try = [
@@ -77,7 +99,6 @@ async def _animate_sticker(bot: Bot, chat_id: int, message_id: int, stop_event: 
     if not _hourglass_stickers:
         return
 
-    # Agar faqat 1 stiker bo'lsa — o'chirib qayta yuborib animatsiyani takrorlaymiz
     if len(_hourglass_stickers) == 1:
         sticker_id = _hourglass_stickers[0]
         try:
@@ -85,12 +106,10 @@ async def _animate_sticker(bot: Bot, chat_id: int, message_id: int, stop_event: 
                 await asyncio.sleep(3.0)
                 if stop_event.is_set():
                     break
-                # Eski stikerni o'chirish
                 try:
                     await bot.delete_message(chat_id=chat_id, message_id=message_id)
                 except Exception:
                     return
-                # Yangi stiker yuborish (animatsiya qayta boshlanadi)
                 if not stop_event.is_set():
                     try:
                         new_msg = await bot.send_sticker(chat_id, sticker_id)
@@ -101,7 +120,6 @@ async def _animate_sticker(bot: Bot, chat_id: int, message_id: int, stop_event: 
             pass
         return
 
-    # Ko'p stiker bo'lsa — edit_message_media bilan almashtirish
     idx = 0
     try:
         while not stop_event.is_set():
@@ -165,8 +183,8 @@ async def _start_animation(bot: Bot, chat_id: int):
             return stop_event, task, msg
         except Exception as e:
             logger.warning(f"Stiker yuborish xatosi: {e}, matn animatsiyaga o'tish")
+            _hourglass_stickers.clear()
 
-    # Fallback: matn animatsiya
     try:
         msg = await bot.send_message(chat_id, "⏳ Video yuklanmoqda . . .")
         task = asyncio.create_task(_animate_text(bot, chat_id, msg.message_id, stop_event))
