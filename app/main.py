@@ -1,4 +1,3 @@
-
 import asyncio
 import logging
 import os
@@ -120,6 +119,10 @@ async def main():
     dp.include_router(cancel_router)
     dp.include_router(profile_router)
     dp.include_router(video_router)
+
+    # Hourglass stikerlarni avtomatik qidirish
+    from app.handlers.video import load_hourglass_stickers
+    await load_hourglass_stickers(_bot)
 
     logger.info("Starting Video Downloader Pro bot...")
 
