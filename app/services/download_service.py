@@ -1,3 +1,5 @@
+"""Download Service - Business logic for video downloads"""
+
 import logging
 import os
 from datetime import datetime
@@ -18,25 +20,6 @@ from app.utils.downloader import (
 from app.config import config
 
 logger = logging.getLogger(__name__)
-
-
-async def _record_download_bg(user_id: int, platform: str, url: str, quality: str, file_size_mb: float):
-    """Downloadni background'da DB ga yozish — foydalanuvchiga ta'sir yo'q."""
-    try:
-        session_factory = await get_session_factory()
-        async with session_factory() as session:
-            download_repo = DownloadRepository(session)
-            user_repo = UserRepository(session)
-            await download_repo.create(
-                user_id=user_id,
-                platform=platform,
-                url=url,
-                quality=quality,
-                file_size=file_size_mb,
-            )
-            await user_repo.update_download_count(user_id)
-    except Exception as e:
-        logger.error(f"Failed to record download: {e}")
 
 
 class DownloadService:
@@ -116,10 +99,24 @@ class DownloadService:
         file_path, info = result
         file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
 
-        # Record download in database (BACKGROUND — javob tezligiga ta'sir yo'q)
+        # Record download in database
         if user_id:
-            import asyncio
-            asyncio.create_task(_record_download_bg(user_id, platform, url, quality, file_size_mb))
+            try:
+                session_factory = await get_session_factory()
+                async with session_factory() as session:
+                    download_repo = DownloadRepository(session)
+                    user_repo = UserRepository(session)
+
+                    await download_repo.create(
+                        user_id=user_id,
+                        platform=platform,
+                        url=url,
+                        quality=quality,
+                        file_size=file_size_mb,
+                    )
+                    await user_repo.update_download_count(user_id)
+            except Exception as e:
+                logger.error(f"Failed to record download: {e}")
 
         return {
             "file_path": file_path,
@@ -128,4 +125,3 @@ class DownloadService:
             "file_size_mb": file_size_mb,
             "quality": quality,
         }
-        

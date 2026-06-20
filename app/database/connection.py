@@ -1,8 +1,7 @@
-"""Database Connection Manager - Supports SQLite (local) and PostgreSQL (Render/Neon)"""
+"""Database Connection Manager"""
 
 import logging
 from typing import AsyncGenerator
-from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -20,78 +19,17 @@ _engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
 
 
-def _fix_database_url(url: str) -> tuple[str, dict]:
-    """
-    Fix DATABASE_URL for asyncpg compatibility.
-    asyncpg doesn't support 'sslmode' query param - needs 'ssl' connect_arg instead.
-    Returns (cleaned_url, connect_args)
-    """
-    connect_args = {}
-
-    if "postgresql" not in url:
-        # SQLite - no changes needed
-        return url, connect_args
-
-    parsed = urlparse(url)
-    query_params = parse_qs(parsed.query)
-
-    # Handle sslmode -> ssl conversion for asyncpg
-    if "sslmode" in query_params:
-        ssl_value = query_params.pop("sslmode")[0]
-        if ssl_value == "require":
-            connect_args["ssl"] = "require"
-        elif ssl_value == "disable":
-            connect_args["ssl"] = False
-        else:
-            connect_args["ssl"] = ssl_value
-
-    # Also handle ssl param directly
-    if "ssl" in query_params:
-        ssl_value = query_params.pop("ssl")[0]
-        if ssl_value == "require" or ssl_value == "true":
-            connect_args["ssl"] = "require"
-        elif ssl_value == "disable" or ssl_value == "false":
-            connect_args["ssl"] = False
-        else:
-            connect_args["ssl"] = ssl_value
-
-    # Rebuild URL without sslmode/ssl params
-    new_query = urlencode({k: v[0] for k, v in query_params.items()})
-    cleaned_url = urlunparse((
-        parsed.scheme,
-        parsed.netloc,
-        parsed.path,
-        parsed.params,
-        new_query,
-        parsed.fragment,
-    ))
-
-    return cleaned_url, connect_args
-
-
 async def get_engine() -> AsyncEngine:
     """Get or create the async database engine"""
     global _engine
     if _engine is None:
-        url = config.db.url
-        kwargs = {
-            "echo": config.log_level == "DEBUG",
-        }
-
-        if "sqlite" in url:
-            kwargs["pool_pre_ping"] = True
-        else:
-            # PostgreSQL - fix URL for asyncpg
-            cleaned_url, connect_args = _fix_database_url(url)
-            url = cleaned_url
-            kwargs["pool_pre_ping"] = True
-            kwargs["pool_size"] = 5
-            kwargs["max_overflow"] = 10
-            if connect_args:
-                kwargs["connect_args"] = connect_args
-
-        _engine = create_async_engine(url, **kwargs)
-        logger.info(f"Database engine created: {'PostgreSQL' if 'postgresql' in config.db.url else 'SQLite'}")
+        _engine = create_async_engine(
+            config.db.url,
+            echo=config.log_level == "DEBUG",
+            pool_pre_ping=True,
+            pool_size=5,
+            max_overflow=10,
+        )
     return _engine
 
 
@@ -130,7 +68,8 @@ async def init_db() -> None:
         # Create all tables
         await conn.run_sync(Base.metadata.create_all)
 
-        # Migrations for SQLite databases
+        # Migrations for existing databases
+        # Check if channel_type column exists in channels table
         if "sqlite" in config.db.url:
             result = await conn.execute(text("PRAGMA table_info(channels)"))
             columns = [row[1] for row in result.fetchall()]

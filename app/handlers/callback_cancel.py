@@ -6,7 +6,8 @@ from aiogram import Router, F
 from aiogram.types import CallbackQuery
 from aiogram.fsm.context import FSMContext
 
-from app.keyboards.inline import back_to_main_kb
+from app.keyboards.inline import admin_menu_kb, back_to_main_kb
+from app.utils.formatter import bold
 
 logger = logging.getLogger(__name__)
 
@@ -20,15 +21,7 @@ async def cancel_action(callback: CallbackQuery, state: FSMContext):
     if current_state:
         await state.clear()
 
-    try:
-        await callback.message.edit_text(
-            "❌ Amal bekor qilindi.",
-            reply_markup=back_to_main_kb(),
-        )
-    except Exception:
-        await callback.message.answer(
-            "❌ Amal bekor qilindi.",
-            reply_markup=back_to_main_kb(),
-        )
-
-    await callback.answer()
+    await callback.message.edit_text(
+        f"❌ Amal bekor qilindi.",
+        reply_markup=back_to_main_kb(),
+    )

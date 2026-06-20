@@ -1,11 +1,9 @@
 services:
-  - type: web
+  - type: worker
     name: video-downloader-bot
     env: python
-    runtime: python-3.12.9
-    buildCommand: bash build.sh
-    startCommand: bash start.sh
-    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m app.main
     envVars:
       - key: BOT_TOKEN
         sync: false
@@ -14,6 +12,6 @@ services:
       - key: BOT_USERNAME
         sync: false
       - key: DATABASE_URL
-        sync: false
-      - key: PYTHON_VERSION
-        value: "3.12.9"
+        value: sqlite+aiosqlite:///./bot_database.db
+      - key: REDIS_ENABLED
+        value: "false"

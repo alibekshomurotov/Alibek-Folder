@@ -112,7 +112,8 @@ def format_video_info(info: dict, platform: str) -> str:
     # Duration
     duration = info.get("duration")
     if duration:
-        text += f"⏱ Davomiylik: {format_duration(int(float(duration)))}\n"
+        text += f"⏱ Davomiylik: {format_duration(int(duration))}\n"
+
     # Views
     views = info.get("view_count")
     if views:
@@ -141,8 +142,14 @@ def format_video_info(info: dict, platform: str) -> str:
 
 def format_video_caption(info: dict, quality: str = "HD") -> str:
     """Format video caption for sent video"""
+    title = info.get("title", "Video")
+    if len(title) > 50:
+        title = title[:47] + "..."
+
     return (
-        f"🤖 @UzVideoSaveBot"
+        f"⚡ Yuklandi\n"
+        f"🎬 {quality} Sifat\n"
+        f"🤖 Downloader Pro"
     )
 
 

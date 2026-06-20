@@ -2,8 +2,6 @@
 
 import asyncio
 import logging
-import os
-import signal
 import sys
 
 from aiogram import Bot, Dispatcher
@@ -23,63 +21,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-_bot = None
-
-
-async def shutdown(sig=None):
-    """To'g'ri shutdown — pollingni to'xtatib, session yopadi."""
-    global _bot
-    logger.info(f"Shutdown signal: {sig}")
-    try:
-        await close_db()
-    except Exception:
-        pass
-    if _bot:
-        try:
-            await _bot.session.close()
-        except Exception:
-            pass
-
-
-async def _dummy_http_server():
-    """Render.com Web Service uchun soxta HTTP server — port bog'lash uchun."""
-    import http.server
-    import socketserver
-
-    port = int(os.getenv("PORT", "10000"))
-
-    class Handler(http.server.BaseHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain")
-            self.end_headers()
-            self.wfile.write(b"Bot is running")
-
-        def do_HEAD(self):
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain")
-            self.end_headers()
-
-        def log_message(self, format, *args):
-            pass  # Log spam yo'q
-
-    class ReusableTCPServer(socketserver.TCPServer):
-        allow_reuse_address = True
-        allow_reuse_port = True
-
-    try:
-        httpd = ReusableTCPServer(("", port), Handler)
-        logger.info(f"✅ HTTP server port {port} da ishga tushdi (Render health check)")
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, httpd.serve_forever)
-    except Exception as e:
-        logger.warning(f"HTTP server xato: {e}")
-
 
 async def main():
     """Main function to start the bot"""
-    global _bot
-
     # Validate config
     if not config.bot.token:
         logger.error("BOT_TOKEN is not set! Please set it in .env file or environment variables.")
@@ -91,7 +35,7 @@ async def main():
     logger.info("Database initialized.")
 
     # Create bot and dispatcher
-    _bot = Bot(
+    bot = Bot(
         token=config.bot.token,
         default=DefaultBotProperties(
             parse_mode=ParseMode.HTML,
@@ -101,34 +45,33 @@ async def main():
     dp = Dispatcher()
 
     # Register middleware
+    from app.middleware.auth import AuthMiddleware, SubscriptionMiddleware
     from app.middleware.throttle import ThrottleMiddleware
-    from app.middleware.auth import AuthMiddleware
     from app.middleware.logging import LoggingMiddleware
 
     dp.message.middleware(ThrottleMiddleware())
     dp.callback_query.middleware(ThrottleMiddleware())
     dp.message.middleware(AuthMiddleware())
     dp.callback_query.middleware(AuthMiddleware())
+    dp.message.middleware(SubscriptionMiddleware())
+    dp.callback_query.middleware(SubscriptionMiddleware())
     dp.message.middleware(LoggingMiddleware())
     dp.callback_query.middleware(LoggingMiddleware())
 
-    # Register handlers — tartib muhim: start > admin > cancel > profile > video
-    # Admin router video router oldin bo'lishi kerak ("🔧 Admin panel" tugmasi uchun)
+    # Register handlers
     from app.handlers.start import router as start_router
+    from app.handlers.video import router as video_router
+    from app.handlers.profile import router as profile_router
+    from app.handlers.premium import router as premium_router
     from app.handlers.admin import router as admin_router
     from app.handlers.callback_cancel import router as cancel_router
-    from app.handlers.profile import router as profile_router
-    from app.handlers.video import router as video_router
 
     dp.include_router(start_router)
+    dp.include_router(video_router)
+    dp.include_router(profile_router)
+    dp.include_router(premium_router)
     dp.include_router(admin_router)
     dp.include_router(cancel_router)
-    dp.include_router(profile_router)
-    dp.include_router(video_router)
-
-    # Hourglass stikerlarni avtomatik qidirish
-    from app.handlers.video import load_hourglass_stickers
-    await load_hourglass_stickers(_bot)
 
     logger.info("Starting Video Downloader Pro bot...")
 
@@ -138,30 +81,31 @@ async def main():
     else:
         logger.warning("FFmpeg not found - limited quality support (pre-merged formats only)")
 
-    # Signal handling
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, lambda s=sig: asyncio.create_task(shutdown(s)))
-        except NotImplementedError:
-            pass
-
-    # Render.com Web Service uchun dummy HTTP server
-    port_env = os.getenv("PORT")
-    if port_env:
-        asyncio.create_task(_dummy_http_server())
-
-    # Start polling
-    logger.info("Starting polling mode...")
-    await _bot.delete_webhook(drop_pending_updates=True)
-    try:
-        await dp.start_polling(
-            _bot,
-            allowed_updates=dp.resolve_used_update_types(),
-            close_bot_session=False,
+    # Start polling or webhook
+    if config.webhook.enabled and config.webhook.url:
+        logger.info(f"Starting webhook mode at {config.webhook.url}")
+        await bot.set_webhook(
+            url=config.webhook.url,
+            drop_pending_updates=True,
         )
-    finally:
-        await shutdown("finally")
+        from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+        from aiohttp import web
+
+        app = web.Application()
+        SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path="/webhook")
+        setup_application(app, dp, bot=bot)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, config.webhook.host, config.webhook.port)
+        await site.start()
+        await asyncio.Event().wait()
+    else:
+        logger.info("Starting polling mode...")
+        await bot.delete_webhook(drop_pending_updates=True)
+        try:
+            await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+        finally:
+            await close_db()
 
 
 if __name__ == "__main__":

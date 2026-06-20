@@ -65,6 +65,13 @@ class RateLimitConfig:
 
 
 @dataclass
+class PremiumConfig:
+    """Premium referral reward configuration"""
+    referral_5_days: int = int(os.getenv("PREMIUM_REFERRAL_5", "3"))
+    referral_20_days: int = int(os.getenv("PREMIUM_REFERRAL_20", "30"))
+
+
+@dataclass
 class Config:
     """Main application configuration"""
     bot: BotConfig = field(default_factory=BotConfig)
@@ -73,6 +80,7 @@ class Config:
     webhook: WebhookConfig = field(default_factory=WebhookConfig)
     download: DownloadConfig = field(default_factory=DownloadConfig)
     rate_limit: RateLimitConfig = field(default_factory=RateLimitConfig)
+    premium: PremiumConfig = field(default_factory=PremiumConfig)
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
 
 
@@ -140,4 +148,5 @@ THEME = {
     "success": "#00FF88",
     "warning": "#FFB800",
     "error": "#FF4444",
+    "premium": "#FFD700",
 }

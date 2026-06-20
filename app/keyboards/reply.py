@@ -1,15 +1,19 @@
 """Reply Keyboards"""
 
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.utils.keyboard import ReplyKeyboardBuilder
 
 
-def admin_reply_kb() -> ReplyKeyboardMarkup:
-    """Admin uchun reply keyboard — faqat Admin panel tugmasi."""
-    kb = [
-        [KeyboardButton(text="🔧 Admin panel")]
-    ]
-    return ReplyKeyboardMarkup(
-        keyboard=kb,
-        resize_keyboard=True,
-        one_time_keyboard=False,
-    )
+def main_reply_kb(is_admin: bool = False) -> ReplyKeyboardMarkup:
+    """Main reply keyboard"""
+    builder = ReplyKeyboardBuilder()
+    builder.button(text="📥 Video yuklash")
+    builder.button(text="👤 Profil")
+    builder.button(text="⭐ Premium")
+    builder.button(text="ℹ️ Yordam")
+
+    if is_admin:
+        builder.button(text="🔧 Admin panel")
+
+    builder.adjust(2, 2, 1 if is_admin else 2)
+    return builder.as_markup(resize_keyboard=True)
