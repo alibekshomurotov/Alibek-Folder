@@ -1,3 +1,5 @@
+"""Database Connection Manager"""
+
 import logging
 from typing import AsyncGenerator
 
@@ -22,13 +24,11 @@ async def get_engine() -> AsyncEngine:
     global _engine
     if _engine is None:
         db_url = config.db.url
-
-        # asyncpg 'sslmode=require' ni tushunmaydi -> 'ssl=require' ga aylantirish
+        # asyncpg does NOT support sslmode= parameter — use ssl= instead
         if "postgresql" in db_url and "sslmode=" in db_url:
             db_url = db_url.replace("sslmode=require", "ssl=require")
             db_url = db_url.replace("sslmode=verify-full", "ssl=require")
             db_url = db_url.replace("sslmode=verify-ca", "ssl=require")
-
         _engine = create_async_engine(
             db_url,
             echo=config.log_level == "DEBUG",
