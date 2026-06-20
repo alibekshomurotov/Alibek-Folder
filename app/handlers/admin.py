@@ -1,5 +1,3 @@
-"""Admin Handler - Admin panel with all management features"""
-
 import logging
 import os
 from typing import Optional
@@ -14,7 +12,6 @@ from app.database.connection import get_session_factory
 from app.database.repositories.user_repo import UserRepository
 from app.database.repositories.channel_repo import ChannelRepository
 from app.services.admin_service import AdminService
-from app.services.premium_service import PremiumService
 from app.services.subscription_service import SubscriptionService
 from app.keyboards.inline import (
     admin_menu_kb, channel_type_select_kb, channel_list_kb,
@@ -25,7 +22,6 @@ from app.utils.formatter import (
     error_message, warning_message,
 )
 from app.states.admin_states import AdminStates
-from app.utils.helpers import generate_promo_code
 
 logger = logging.getLogger(__name__)
 
@@ -39,11 +35,39 @@ def is_admin(user_id: int) -> bool:
 
 # ============ Admin Menu ============
 
+@router.callback_query(F.data == "admin_panel_open")
+async def admin_panel_inline(callback: CallbackQuery, state: FSMContext):
+    """Admin panel — inline yashirin tugma orqali (hech qanday qo'shimcha xabar yo'q)."""
+    if not is_admin(callback.from_user.id):
+        await callback.answer()
+        return
+    await state.clear()
+    text = (
+        f"🔧 {bold('Admin Panel')}\n\n"
+        f"Bo'limni tanlang:"
+    )
+    try:
+        await callback.message.edit_text(text, reply_markup=admin_menu_kb(), parse_mode="HTML")
+    except Exception:
+        await callback.message.answer(text, reply_markup=admin_menu_kb(), parse_mode="HTML")
+    await callback.answer()
+
+
 @router.message(Command("admin"))
 async def cmd_admin(message: Message, state: FSMContext):
-    """Open admin panel"""
+    """Open admin panel — /admin buyrug'i"""
+    await _open_admin_panel(message, state)
+
+
+@router.message(F.text == "🔧 Admin panel")
+async def msg_admin_panel(message: Message, state: FSMContext):
+    """Open admin panel — reply keyboard tugmasi"""
+    await _open_admin_panel(message, state)
+
+
+async def _open_admin_panel(message: Message, state: FSMContext):
+    """Admin panelni ochish"""
     if not is_admin(message.from_user.id):
-        await message.answer("❌ Siz admin emassiz.")
         return
 
     await state.clear()
@@ -79,7 +103,11 @@ async def admin_stats(callback: CallbackQuery):
     stats = await AdminService.get_stats()
     text = format_admin_stats(**stats)
     kb = admin_back_kb()
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    try:
+        await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    except Exception:
+        await callback.message.answer(text, reply_markup=kb, parse_mode="HTML")
+    await callback.answer()
 
 
 # ============ Users ============
@@ -90,19 +118,27 @@ async def admin_users(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         return
 
-    users = await AdminService.get_top_users(10)
+    # BARCHA foydalanuvchilarni olish (limit yo'q)
+    users = await AdminService.get_users(limit=10000)
 
-    text = f"👥 {bold('Eng faol foydalanuvchilar')}\n\n{separator()}\n\n"
+    text = f"👥 {bold('Barcha foydalanuvchilar')} ({len(users)})\n\n{separator()}\n\n"
     for i, user in enumerate(users, 1):
-        premium_badge = " ⭐" if user.is_premium_active else ""
         banned_badge = " 🚫" if user.is_banned else ""
         text += (
-            f"{i}. {user.first_name or 'N/A'} (@{user.username or 'N/A'}){premium_badge}{banned_badge}\n"
+            f"{i}. {user.first_name or 'N/A'} (@{user.username or 'N/A'}){banned_badge}\n"
             f"   🆔 {user.id} | 📥 {user.downloads_count} | 🔄 {user.referrals_count}\n\n"
         )
 
+    # Telegram xabar chegarasi — agar juda uzun bo'lsa, qisqartiramiz
+    if len(text) > 4000:
+        text = text[:3900] + f"\n\n... va yana {len(users) - 10} ta foydalanuvchi"
+
     kb = admin_back_kb()
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    try:
+        await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    except Exception:
+        await callback.message.answer(text, reply_markup=kb, parse_mode="HTML")
+    await callback.answer()
 
 
 # ============ Mailing ============
@@ -285,132 +321,6 @@ async def confirm_post(callback: CallbackQuery, state: FSMContext):
         f"❌ Xatolik: {failed}"
     )
     await callback.message.edit_text(text, reply_markup=admin_back_kb(), parse_mode="HTML")
-
-
-# ============ Promo Code ============
-
-@router.callback_query(F.data == "admin_promo")
-async def admin_promo(callback: CallbackQuery):
-    """Show promo code options"""
-    if not is_admin(callback.from_user.id):
-        return
-
-    # Show existing promo codes
-    from app.database.repositories.promo_repo import PromoCodeRepository
-    session_factory = await get_session_factory()
-
-    async with session_factory() as session:
-        promo_repo = PromoCodeRepository(session)
-        promos = await promo_repo.get_all()
-
-    text = f"🎁 {bold('Promo kodlar')}\n\n{separator()}\n\n"
-
-    if promos:
-        for p in promos[-10:]:  # Show last 10
-            status = "✅" if p.is_active else "❌"
-            text += (
-                f"{status} {code(p.code)} — {p.premium_days} kun\n"
-                f"   Foydalanish: {p.used_count}/{p.max_uses}\n\n"
-            )
-    else:
-        text += "Hali promo kod yo'q.\n\n"
-
-    text += f"\nYangi promo kod yaratish uchun:\n/promo [kun_soni] [maks_foydalanish]"
-
-    kb = admin_back_kb()
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-
-
-@router.message(Command("promo"))
-async def cmd_promo(message: Message):
-    """Create promo code: /promo [days] [max_uses]"""
-    if not is_admin(message.from_user.id):
-        return
-
-    args = message.text.split()[1:] if len(message.text.split()) > 1 else []
-
-    if len(args) < 1:
-        await message.answer(
-            f"🎁 Foydalanish: /promo [kun_soni] [maks_foydalanish]\n\n"
-            f"Misol: /promo 7 10"
-        )
-        return
-
-    try:
-        days = int(args[0])
-        max_uses = int(args[1]) if len(args) > 1 else 1
-    except ValueError:
-        await message.answer("❌ Noto'g'ri format. Raqam kiriting.")
-        return
-
-    promo = await PremiumService.create_promo_code(days, max_uses)
-
-    text = (
-        f"🎁 {bold('Promo kod yaratildi!')}\n\n"
-        f"🔑 Kod: {code(promo.code)}\n"
-        f"📅 Premium: {days} kun\n"
-        f"👥 Maks foydalanish: {max_uses}"
-    )
-    await message.answer(text, parse_mode="HTML")
-
-
-# ============ Premium Grant ============
-
-@router.callback_query(F.data == "admin_premium_grant")
-async def admin_premium_grant(callback: CallbackQuery, state: FSMContext):
-    """Start premium granting"""
-    if not is_admin(callback.from_user.id):
-        return
-
-    await state.set_state(AdminStates.premium_user_id)
-    text = (
-        f"⭐ {bold('Premium berish')}\n\n"
-        f"Foydalanuvchi ID sini yuboring:"
-    )
-    from app.keyboards.inline import cancel_kb
-    await callback.message.edit_text(text, reply_markup=cancel_kb(), parse_mode="HTML")
-
-
-@router.message(AdminStates.premium_user_id)
-async def process_premium_user_id(message: Message, state: FSMContext):
-    """Process premium user ID"""
-    try:
-        user_id = int(message.text.strip())
-    except ValueError:
-        await message.answer("❌ Noto'g'ri ID. Raqam kiriting.")
-        return
-
-    await state.update_data(premium_user_id=user_id)
-    await state.set_state(AdminStates.premium_days)
-
-    text = (
-        f"⭐ Premium kunlar sonini yuboring:\n\n"
-        f"Foydalanuvchi: {code(str(user_id))}"
-    )
-    await message.answer(text, parse_mode="HTML")
-
-
-@router.message(AdminStates.premium_days)
-async def process_premium_days(message: Message, state: FSMContext):
-    """Process premium days"""
-    try:
-        days = int(message.text.strip())
-    except ValueError:
-        await message.answer("❌ Noto'g'ri. Raqam kiriting.")
-        return
-
-    data = await state.get_data()
-    user_id = data.get("premium_user_id")
-    await state.clear()
-
-    result = await PremiumService.grant_premium(user_id, days, "admin_grant")
-
-    if result:
-        text = success_message(f"Foydalanuvchi {code(str(user_id))} ga {days} kun premium berildi.")
-    else:
-        text = error_message(f"Foydalanuvchi {code(str(user_id))} topilmadi.")
-
-    await message.answer(text, reply_markup=admin_back_kb(), parse_mode="HTML")
 
 
 # ============ Ban ============
@@ -599,12 +509,23 @@ async def admin_channel_remove(callback: CallbackQuery, state: FSMContext):
 
     if not channels:
         text = warning_message("Hech qanday kanal topilmadi.")
-        await callback.message.edit_text(text, reply_markup=admin_back_kb(), parse_mode="HTML")
+        kb = admin_back_kb()
+        try:
+            await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        except Exception:
+            await callback.message.answer(text, reply_markup=kb, parse_mode="HTML")
+        await callback.answer()
         return
 
-    text = f"🗑 {bold('Kanal o\'chirish')}\n\nO'chirish uchun kanalni tanlang:"
+    text = (
+        f"📺 {bold('Kanal o\'chirish')}\n\nO'chirish uchun kanalni tanlang:"
+    )
     kb = channel_list_kb(channels)
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    try:
+        await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    except Exception:
+        await callback.message.answer(text, reply_markup=kb, parse_mode="HTML")
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("remove_channel_"))
@@ -621,7 +542,11 @@ async def process_remove_channel(callback: CallbackQuery, state: FSMContext):
     else:
         text = error_message("Kanal topilmadi.")
 
-    await callback.message.edit_text(text, reply_markup=admin_back_kb(), parse_mode="HTML")
+    try:
+        await callback.message.edit_text(text, reply_markup=admin_back_kb(), parse_mode="HTML")
+    except Exception:
+        await callback.message.answer(text, reply_markup=admin_back_kb(), parse_mode="HTML")
+    await callback.answer()
 
 
 # ============ Settings ============
@@ -643,5 +568,8 @@ async def admin_settings(callback: CallbackQuery, state: FSMContext):
         f"{info_line('Cookie fayl', '✅ Mavjud' if os.path.exists(config.download.cookies_file) else '❌ Yo\'q')}\n"
     )
     kb = admin_back_kb()
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-
+    try:
+        await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    except Exception:
+        await callback.message.answer(text, reply_markup=kb, parse_mode="HTML")
+    await callback.answer()

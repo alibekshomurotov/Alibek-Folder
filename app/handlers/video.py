@@ -1,28 +1,26 @@
-"""Video Handler - Video download processing"""
-
 import asyncio
+import functools
+import json
 import logging
 import os
-from typing import Dict
+import subprocess
+import tempfile
+import time
+from typing import Dict, Optional
 
 from aiogram import Router, F, Bot
-from aiogram.types import Message, CallbackQuery, FSInputFile
+from aiogram.types import Message, CallbackQuery, FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.filter import StateFilter
+from aiogram.filters import StateFilter
 
-from app.config import config
+from app.config import config, SUPPORTED_PLATFORMS
 from app.database.connection import get_session_factory
 from app.database.repositories.user_repo import UserRepository
-from app.services.download_service import DownloadService
+from app.database.repositories.download_repo import DownloadRepository
 from app.services.subscription_service import SubscriptionService
-from app.keyboards.inline import quality_select_kb, back_to_main_kb
 from app.utils.downloader import (
     detect_platform, is_video_url,
-    format_file_size, cleanup_file,
-)
-from app.utils.formatter import (
-    format_video_info, format_video_caption, format_loading_step,
-    format_error, bold,
+    download_video, cleanup_file, LoginRequiredError,
 )
 from app.utils.helpers import extract_url_from_text as extract_url
 
@@ -30,29 +28,223 @@ logger = logging.getLogger(__name__)
 
 router = Router()
 
-# Store video info temporarily (in production, use Redis)
-_video_cache: Dict[str, dict] = {}
+# MP3 tugmasi uchun cache
+_url_cache: Dict[str, dict] = {}
+_CACHE_TTL = 1800  # 30 daqiqa
+
+# Yuklangan video fayl keshi - MP3 olish uchun
+_video_file_cache: Dict[str, dict] = {}
+_VIDEO_FILE_CACHE_TTL = 300  # 5 daqiqa
+
+# Oldindan tayyorlangan MP3 fayl keshi
+_mp3_ready_cache: Dict[str, str] = {}
+
+# Bot username
+_BOT_LINK = "@UzVideoSaveBot"
+
+
+def _ensure_mp4(file_path: str, force_reencode: bool = False) -> str:
+    """Faylni Telegram uchun mos MP4 formatiga keltirish."""
+    if not os.path.exists(file_path):
+        return file_path
+
+    ext = os.path.splitext(file_path)[1].lower()
+
+    if ext == ".mp4" and not force_reencode:
+        if config.download.ffmpeg_available:
+            try:
+                probe = subprocess.run(
+                    ["ffprobe", "-v", "quiet", "-print_format", "json",
+                     "-show_streams", "-select_streams", "v:0", file_path],
+                    capture_output=True, timeout=3
+                )
+                if probe.returncode == 0:
+                    streams = json.loads(probe.stdout).get("streams", [])
+                    if streams:
+                        vcodec = streams[0].get("codec_name", "")
+                        if vcodec in ("h264", "h265", "hevc", "av1"):
+                            logger.info(f"[Video] {vcodec} - qayta kodlash shart emas")
+                            return file_path
+            except Exception:
+                pass
+        return file_path
+
+    if not config.download.ffmpeg_available:
+        if ext != ".mp4":
+            new_path = file_path.rsplit(".", 1)[0] + ".mp4"
+            os.rename(file_path, new_path)
+            return new_path
+        return file_path
+
+    try:
+        new_path = file_path.rsplit(".", 1)[0] + ".mp4"
+        if file_path == new_path:
+            new_path = file_path.rsplit(".", 1)[0] + "_telegram.mp4"
+
+        logger.info(f"[Video] {'Qayta kodlash' if ext == '.mp4' else f'{ext} -> mp4'}")
+
+        result = subprocess.run(
+            ["ffmpeg", "-i", file_path,
+             "-c:v", "libx264",
+             "-c:a", "aac",
+             "-movflags", "+faststart",
+             "-preset", "ultrafast",
+             "-crf", "28",
+             "-pix_fmt", "yuv420p",
+             "-threads", "4",
+             "-y", new_path],
+            capture_output=True, timeout=30
+        )
+
+        if result.returncode == 0 and os.path.exists(new_path) and os.path.getsize(new_path) > 0:
+            try:
+                if file_path != new_path:
+                    os.remove(file_path)
+            except OSError:
+                pass
+            return new_path
+        else:
+            if os.path.exists(new_path) and file_path != new_path:
+                try:
+                    os.remove(new_path)
+                except OSError:
+                    pass
+            if ext != ".mp4":
+                renamed = file_path.rsplit(".", 1)[0] + ".mp4"
+                if not os.path.exists(renamed):
+                    os.rename(file_path, renamed)
+                    return renamed
+            return file_path
+
+    except subprocess.TimeoutExpired:
+        logger.warning("[Video] Konvertatsiya timeout")
+        if ext != ".mp4":
+            new_path = file_path.rsplit(".", 1)[0] + ".mp4"
+            if not os.path.exists(new_path):
+                os.rename(file_path, new_path)
+                return new_path
+        return file_path
+    except Exception as e:
+        logger.warning(f"[Video] Konvertatsiya xatosi: {e}")
+        if ext != ".mp4":
+            new_path = file_path.rsplit(".", 1)[0] + ".mp4"
+            if not os.path.exists(new_path):
+                os.rename(file_path, new_path)
+                return new_path
+        return file_path
+
+
+def _make_mp3_kb(url: str) -> InlineKeyboardMarkup:
+    """Video tagidagi MP3 tugmasi."""
+    key = str(hash(url) % 100000000)
+    _url_cache[key] = {"url": url, "cached_at": time.time()}
+
+    now = time.time()
+    expired = [k for k, v in _url_cache.items() if now - v.get("cached_at", 0) > _CACHE_TTL]
+    for k in expired:
+        del _url_cache[k]
+    vf_expired = [k for k, v in _video_file_cache.items() if now - v.get("cached_at", 0) > _VIDEO_FILE_CACHE_TTL]
+    for k in vf_expired:
+        old_path = _video_file_cache[k].get("file_path", "")
+        if old_path and os.path.exists(old_path):
+            try:
+                os.remove(old_path)
+            except OSError:
+                pass
+        del _video_file_cache[k]
+    mp3_expired_keys = [k for k, v in _url_cache.items() if now - v.get("cached_at", 0) > _CACHE_TTL]
+    for k in list(_mp3_ready_cache.keys()):
+        if k not in _url_cache:
+            old_mp3 = _mp3_ready_cache.pop(k, "")
+            if old_mp3 and os.path.exists(old_mp3):
+                try:
+                    os.remove(old_mp3)
+                except OSError:
+                    pass
+
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎵 MP3", callback_data=f"mp3_{key}")]
+    ])
+
+
+def _format_story_error(missing_cookies: list = None) -> str:
+    """Instagram story xato xabari."""
+    base = "❌ <b>Instagram Story yuklab bo'lmadi</b>\n\n"
+    if missing_cookies:
+        missing_str = ", ".join(f"<code>{c}</code>" for c in missing_cookies)
+        base += f"🔍 Cookie'lar yetishmayapti: {missing_str}\n\n"
+    else:
+        base += "🔍 Story uchun Instagram akkaunti kerak.\n\n"
+    base += (
+        "💡 Cookie faylini yangilash uchun administratorga murojaat qiling.\n\n"
+        "📸 Reels va Post'lar ishlaydi!"
+    )
+    return base
+
+
+def _extract_mp3_sync(video_path: str, mp3_path: str) -> bool:
+    """ffmpeg bilan MP3 ajratish (sync - thread da ishlaydi)."""
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-i", video_path,
+             "-vn",
+             "-acodec", "libmp3lame",
+             "-ab", "128k",
+             "-ar", "44100",
+             "-ac", "2",
+             "-y", mp3_path],
+            capture_output=True, timeout=20
+        )
+        return result.returncode == 0 and os.path.exists(mp3_path) and os.path.getsize(mp3_path) > 0
+    except Exception as e:
+        logger.warning(f"[MP3] ffmpeg xatosi: {e}")
+        return False
+
+
+async def _pre_extract_mp3(key: str, video_path: str, info: dict):
+    """Fon rejimida MP3 tayyorlash."""
+    if not config.download.ffmpeg_available:
+        return
+
+    mp3_dir = os.path.join(tempfile.gettempdir(), "mp3_cache")
+    os.makedirs(mp3_dir, exist_ok=True)
+    mp3_path = os.path.join(mp3_dir, f"{key}_pre.mp3")
+
+    try:
+        success = await asyncio.to_thread(_extract_mp3_sync, video_path, mp3_path)
+        if success:
+            _mp3_ready_cache[key] = mp3_path
+            logger.info(f"[MP3] Oldindan tayyorlandi: {mp3_path}")
+        else:
+            logger.warning("[MP3] Oldindan tayyorlash muvaffaqiyatsiz")
+    except Exception as e:
+        logger.warning(f"[MP3] Oldindan tayyorlash xatosi: {e}")
+
+
+def _run_download_in_thread(url: str, quality: str, audio_only: bool):
+    """download_video ni alohida event loop da thread pool da ishlatish.
+
+    Bu yt-dlp bloklashi event loop ga ta'sir qilmaydi -
+    ⏳ qum soat stikeri aylanaveradi!
+    """
+    new_loop = asyncio.new_event_loop()
+    try:
+        return new_loop.run_until_complete(download_video(url, quality, audio_only))
+    finally:
+        new_loop.close()
 
 
 @router.message(StateFilter(None), ~F.text.startswith("/"))
 async def handle_video_link(message: Message, state: FSMContext):
-    """Handle video link messages"""
-    # Extract URL from message
+    """Link -> avtomatik yuklash -> video + MP3 tugmasi"""
     url = extract_url(message.text or "")
-
     if not url:
-        # Not a URL, ignore
         return
 
     if not is_video_url(url):
-        await message.answer(
-            format_error("invalid_link"),
-            reply_markup=back_to_main_kb(),
-            parse_mode="HTML",
-        )
         return
 
-    # Check subscription
+    # Obuna tekshirish
     if not config.bot.is_admin(message.from_user.id):
         is_subscribed, unsubscribed = await SubscriptionService.is_subscribed(
             message.bot, message.from_user.id
@@ -65,235 +257,342 @@ async def handle_video_link(message: Message, state: FSMContext):
             await message.answer(text, reply_markup=kb, parse_mode="HTML")
             return
 
-    # Register user if not exists
-    session_factory = await get_session_factory()
-    async with session_factory() as session:
-        user_repo = UserRepository(session)
-        await user_repo.get_or_create(
-            user_id=message.from_user.id,
-            username=message.from_user.username,
-            first_name=message.from_user.first_name,
+    # Foydalanuvchini background'da ro'yxatga olish (javob tezligiga ta'sir yo'q)
+    asyncio.create_task(
+        _save_user_bg(
+            message.from_user.id,
+            message.from_user.username,
+            message.from_user.first_name,
         )
-
-    # Start loading animation
-    loading_msg = await message.answer("🕐 Link tekshirilmoqda...")
-
-    # Animate loading
-    animation_task = asyncio.create_task(
-        _animate_loading(message.bot, loading_msg)
     )
 
+    platform = detect_platform(url)
+
+    # ⏳ QUM SOAT STIKERI - Telegram o'zi animatsiya qiladi!
+    loading_msg = await message.answer("⏳")
+
+    # Yuklashni alohida thread da ishlatamiz - event loop OZOD BO'LADI
+    # Shunda ⏳ qum soat aylanib turadi, qotib qolmaydi!
+    loop = asyncio.get_event_loop()
     try:
-        # Extract video info
-        result = await DownloadService.process_url(url)
+        result = await loop.run_in_executor(
+            None,
+            functools.partial(_run_download_in_thread, url, "720", False)
+        )
 
         if result is None:
-            animation_task.cancel()
-            await loading_msg.edit_text(
-                format_error("download_error"),
-                reply_markup=back_to_main_kb(),
-                parse_mode="HTML",
-            )
-            return
-
-        # Cancel animation
-        animation_task.cancel()
-
-        # Cache video info
-        video_id = result["info"].get("id", str(hash(url)))
-        _video_cache[video_id] = {
-            "url": url,
-            "info": result["info"],
-            "platform": result["platform"],
-        }
-
-        # Clean cache if too large
-        if len(_video_cache) > 100:
-            oldest = list(_video_cache.keys())[:50]
-            for k in oldest:
-                del _video_cache[k]
-
-        # Show video info with quality selection
-        text = format_video_info(result["info"], result["platform"])
-        kb = quality_select_kb(video_id, result["available_qualities"])
-
-        # Try to send thumbnail
-        thumbnail_url = result["info"].get("thumbnail")
-        if thumbnail_url:
             try:
                 await loading_msg.delete()
-                await message.answer_photo(
-                    photo=thumbnail_url,
-                    caption=text,
-                    reply_markup=kb,
+            except Exception:
+                pass
+
+            if platform == "youtube":
+                await message.answer(
+                    "❌ <b>YouTube yuklab bo'lmadi</b>\n\n"
+                    "🔍 Sabab: YouTube server IP ni bloklamoqda (bot detektsiya).\n\n"
+                    "💡 Yechim:\n"
+                    "- Keyinroq qayta urinib ko'ring\n"
+                    "- Boshqa video linkini yuboring\n"
+                    "- Agar doim shu xato chiqsa - administratorga xabar bering",
                     parse_mode="HTML",
                 )
-            except Exception:
-                await loading_msg.edit_text(
-                    text, reply_markup=kb, parse_mode="HTML"
+            else:
+                await message.answer(
+                    "❌ <b>Video yuklab bo'lmadi.</b>\n\nLinkni tekshiring va qayta urinib ko'ring.",
+                    parse_mode="HTML",
                 )
-        else:
-            await loading_msg.edit_text(
-                text, reply_markup=kb, parse_mode="HTML"
-            )
-
-    except Exception as e:
-        animation_task.cancel()
-        logger.error(f"Error processing video: {e}")
-        try:
-            await loading_msg.edit_text(
-                format_error("server_error"),
-                reply_markup=back_to_main_kb(),
-                parse_mode="HTML",
-            )
-        except Exception:
-            pass
-
-
-@router.callback_query(F.data.startswith("quality_"))
-async def handle_quality_select(callback: CallbackQuery, state: FSMContext):
-    """Handle quality selection"""
-    # Parse callback data: quality_{video_id}_{quality}
-    parts = callback.data.split("_")
-    if len(parts) < 3:
-        await callback.answer("❌ Xatolik", show_alert=True)
-        return
-
-    video_id = parts[1]
-    quality = parts[2]
-    audio_only = quality == "mp3"
-
-    # Get cached video info
-    video_data = _video_cache.get(video_id)
-    if not video_data:
-        await callback.answer("⏰ Sessiya tugadi. Qayta link yuboring.", show_alert=True)
-        return
-
-    url = video_data["url"]
-
-    # Start download with animation
-    loading_msg = await callback.message.answer("🕐 Yuklab olinmoqda...")
-
-    animation_task = asyncio.create_task(
-        _animate_loading(callback.bot, loading_msg)
-    )
-
-    try:
-        quality_str = quality if not audio_only else "720p"
-        result = await DownloadService.download(
-            url=url,
-            quality=quality_str,
-            audio_only=audio_only,
-            user_id=callback.from_user.id,
-        )
-
-        animation_task.cancel()
-
-        if result is None:
-            await loading_msg.edit_text(
-                format_error("download_error"),
-                reply_markup=back_to_main_kb(),
-                parse_mode="HTML",
-            )
             return
 
-        file_path = result["file_path"]
-        file_size_mb = result["file_size_mb"]
-
-        # Send the file
+    except LoginRequiredError as e:
         try:
-            if audio_only:
-                # Send as audio
-                await callback.message.answer_audio(
-                    audio=FSInputFile(file_path),
-                    caption=f"🎵 MP3 Audio\n🤖 Downloader Pro",
-                )
-            elif file_size_mb > config.download.max_file_size_mb:
-                # Send as document if too large
-                await callback.message.answer_document(
-                    document=FSInputFile(file_path),
-                    caption=format_video_caption(result["info"], quality.upper()),
-                )
-            else:
-                # Send as video
-                try:
-                    await callback.message.answer_video(
-                        video=FSInputFile(file_path),
-                        caption=format_video_caption(result["info"], quality.upper()),
-                    )
-                except Exception:
-                    # If send_video fails, try as document
-                    await callback.message.answer_document(
-                        document=FSInputFile(file_path),
-                        caption=format_video_caption(result["info"], quality.upper()),
-                    )
-
             await loading_msg.delete()
-
-        except Exception as e:
-            logger.error(f"Error sending file: {e}")
-            await loading_msg.edit_text(
-                format_error("server_error"),
-                reply_markup=back_to_main_kb(),
-                parse_mode="HTML",
-            )
-        finally:
-            # Cleanup file
-            cleanup_file(file_path)
-
-    except Exception as e:
-        animation_task.cancel()
-        logger.error(f"Error downloading: {e}")
-        try:
-            await loading_msg.edit_text(
-                format_error("server_error"),
-                reply_markup=back_to_main_kb(),
-                parse_mode="HTML",
-            )
         except Exception:
             pass
+
+        if e.platform == "instagram" and e.content_type == "story":
+            await message.answer(_format_story_error(e.missing_cookies), parse_mode="HTML")
+        else:
+            await message.answer(
+                "❌ <b>Video yuklab bo'lmadi.</b>\n\nLinkni tekshiring va qayta urinib ko'ring.",
+                parse_mode="HTML",
+            )
+        return
+
+    except Exception as e:
+        logger.error(f"Download error: {e}")
+        try:
+            await loading_msg.delete()
+        except Exception:
+            pass
+        await message.answer("⚠️ <b>Server band.</b> Qayta urinib ko'ring.", parse_mode="HTML")
+        return
+
+    file_path, info = result
+    file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+
+    # Instagram uchun qayta kodlash
+    extractor = info.get("extractor", "") if info else ""
+    force_reencode = extractor == "instagram" or "/stories/" in str(info.get("webpage_url", "") if info else "")
+    file_path = _ensure_mp4(file_path, force_reencode=force_reencode)
+
+    # Video faylni MP3 olish uchun keshlash - symlink orqali (tezroq)
+    mp3_key = str(hash(url) % 100000000)
+    cache_dir = os.path.join(tempfile.gettempdir(), "mp3_cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    cached_file = os.path.join(cache_dir, f"{mp3_key}.mp4")
+    try:
+        if os.path.exists(cached_file):
+            os.remove(cached_file)
+        os.symlink(file_path, cached_file)
+        _video_file_cache[mp3_key] = {
+            "file_path": cached_file,
+            "info": info or {},
+            "cached_at": time.time(),
+        }
+        logger.info(f"[MP3] Video fayl symlink keshlandi: {cached_file}")
+    except Exception as e:
+        logger.warning(f"[MP3] Symlink xatosi, nusxa ko'chirilmoqda: {e}")
+        try:
+            import shutil
+            shutil.copy2(file_path, cached_file)
+            _video_file_cache[mp3_key] = {
+                "file_path": cached_file,
+                "info": info or {},
+                "cached_at": time.time(),
+            }
+        except Exception as e2:
+            logger.warning(f"[MP3] Fayl keshlash xatosi: {e2}")
+
+    # Caption
+    caption = f"🤖 {_BOT_LINK}"
+
+    # MP3 tugmasi
+    mp3_kb = _make_mp3_kb(url)
+
+    # Qum soatni o'chirish
+    try:
+        await loading_msg.delete()
+    except Exception:
+        pass
+
+    # Video yuborish
+    try:
+        if file_size_mb > config.download.max_file_size_mb:
+            await message.answer_document(
+                document=FSInputFile(file_path),
+                caption=caption,
+                reply_markup=mp3_kb,
+            )
+        else:
+            try:
+                await message.answer_video(
+                    video=FSInputFile(file_path),
+                    caption=caption,
+                    supports_streaming=True,
+                    reply_markup=mp3_kb,
+                )
+            except Exception:
+                await message.answer_document(
+                    document=FSInputFile(file_path),
+                    caption=caption,
+                    reply_markup=mp3_kb,
+                )
+    except Exception as e:
+        logger.error(f"Send error: {e}")
+        await message.answer("⚠️ <b>Video yuborishda xatolik.</b>", parse_mode="HTML")
+    finally:
+        cleanup_file(file_path)
+
+    # Fon rejimida MP3 tayyorlash
+    if cached_file and os.path.exists(cached_file):
+        asyncio.create_task(_pre_extract_mp3(mp3_key, cached_file, info or {}))
+
+    # Bazaga yozish - fon rejimida
+    asyncio.create_task(_save_download_stat(message.from_user.id, platform or "unknown", url, file_size_mb))
+
+
+async def _save_user_bg(user_id: int, username: str, first_name: str):
+    """Foydalanuvchini background'da ro'yxatga olish."""
+    try:
+        session_factory = await get_session_factory()
+        async with session_factory() as session:
+            user_repo = UserRepository(session)
+            await user_repo.get_or_create(
+                user_id=user_id,
+                username=username,
+                first_name=first_name,
+            )
+    except Exception as e:
+        logger.error(f"User register bg error: {e}")
+
+
+async def _save_download_stat(user_id: int, platform: str, url: str, file_size_mb: float):
+    """Bazaga yuklash statistikasini fon rejimida yozish."""
+    try:
+        session_factory = await get_session_factory()
+        async with session_factory() as session:
+            download_repo = DownloadRepository(session)
+            user_repo = UserRepository(session)
+            await download_repo.create(
+                user_id=user_id,
+                platform=platform,
+                url=url,
+                quality="720p",
+                file_size=file_size_mb,
+            )
+            await user_repo.update_download_count(user_id)
+    except Exception as e:
+        logger.error(f"DB error: {e}")
+
+
+@router.callback_query(F.data.startswith("mp3_"))
+async def handle_mp3_request(callback: CallbackQuery, state: FSMContext):
+    """MP3 tugmasi -> audio yuklash"""
+    key = callback.data.replace("mp3_", "")
+    cache_data = _url_cache.get(key)
+
+    if not cache_data or "url" not in cache_data:
+        await callback.answer("⏰ Qayta link yuboring.", show_alert=True)
+        return
+
+    if time.time() - cache_data.get("cached_at", 0) > _CACHE_TTL:
+        del _url_cache[key]
+        await callback.answer("⏰ Qayta link yuboring.", show_alert=True)
+        return
+
+    await callback.answer("⏬ Audio yuklanmoqda...")
+
+    url = cache_data["url"]
+    file_path_to_cleanup = None
+
+    # 1-USUL: Oldindan tayyorlangan MP3 fayl
+    pre_mp3 = _mp3_ready_cache.get(key)
+    if pre_mp3 and os.path.exists(pre_mp3):
+        logger.info(f"[MP3] Oldindan tayyorlangan fayl topildi: {pre_mp3}")
+        cached_video = _video_file_cache.get(key)
+        info = cached_video.get("info", {}) if cached_video else {}
+        title = info.get("title", "Audio")
+        safe_title = "".join(c for c in title if c.isalnum() or c in " -_").strip()[:50]
+        caption = f"🤖 {_BOT_LINK}"
+
+        try:
+            await callback.message.answer_audio(
+                audio=FSInputFile(pre_mp3),
+                caption=caption,
+                title=safe_title,
+            )
+        except Exception:
+            await callback.message.answer_document(
+                document=FSInputFile(pre_mp3),
+                caption=caption,
+            )
+        logger.info("[MP3] Oldindan tayyorlangan fayl muvaffaqiyatli yuborildi!")
+        return
+
+    # 2-USUL: Keshlangan video fayldan ffmpeg bilan audio ajratish
+    cached_video = _video_file_cache.get(key)
+    if cached_video and os.path.exists(cached_video.get("file_path", "")):
+        video_path = cached_video["file_path"]
+        info = cached_video.get("info", {})
+        logger.info(f"[MP3] Keshlangan fayldan audio ajratilmoqda: {video_path}")
+
+        if config.download.ffmpeg_available:
+            try:
+                mp3_dir = tempfile.mkdtemp()
+                mp3_path = os.path.join(mp3_dir, f"{key}.mp3")
+
+                success = await asyncio.to_thread(_extract_mp3_sync, video_path, mp3_path)
+
+                if success:
+                    file_path_to_cleanup = mp3_path
+                    title = info.get("title", "Audio") if info else "Audio"
+                    safe_title = "".join(c for c in title if c.isalnum() or c in " -_").strip()[:50]
+                    caption = f"🤖 {_BOT_LINK}"
+
+                    try:
+                        await callback.message.answer_audio(
+                            audio=FSInputFile(mp3_path),
+                            caption=caption,
+                            title=safe_title,
+                        )
+                    except Exception:
+                        await callback.message.answer_document(
+                            document=FSInputFile(mp3_path),
+                            caption=caption,
+                        )
+
+                    logger.info("[MP3] Keshlangan fayldan muvaffaqiyatli ajratildi!")
+                    return
+                else:
+                    logger.warning("[MP3] ffmpeg audio ajratish xatosi")
+            except Exception as e:
+                logger.warning(f"[MP3] ffmpeg xatosi: {e}")
+
+    # 3-USUL: Qayta yuklash
+    loading_msg = await callback.message.answer("⏳")
+    try:
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            functools.partial(_run_download_in_thread, url, "720", True)
+        )
+
+        try:
+            await loading_msg.delete()
+        except Exception:
+            pass
+
+        if result is None:
+            await callback.message.answer("❌ <b>Audio yuklab bo'lmadi.</b>", parse_mode="HTML")
+            return
+
+        file_path, info = result
+        file_path_to_cleanup = file_path
+
+        title = info.get("title", "Audio") if info else "Audio"
+        safe_title = "".join(c for c in title if c.isalnum() or c in " -_").strip()[:50]
+        caption = f"🤖 {_BOT_LINK}"
+
+        try:
+            await callback.message.answer_audio(
+                audio=FSInputFile(file_path),
+                caption=caption,
+                title=safe_title,
+            )
+        except Exception:
+            await callback.message.answer_document(
+                document=FSInputFile(file_path),
+                caption=caption,
+            )
+
+    except LoginRequiredError as e:
+        try:
+            await loading_msg.delete()
+        except Exception:
+            pass
+        if e.platform == "instagram" and e.content_type == "story":
+            await callback.message.answer(_format_story_error(e.missing_cookies), parse_mode="HTML")
+        else:
+            await callback.message.answer("❌ <b>Audio yuklab bo'lmadi.</b>", parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"MP3 error: {e}")
+        try:
+            await loading_msg.delete()
+        except Exception:
+            pass
+        await callback.message.answer("⚠️ <b>Server band.</b>", parse_mode="HTML")
+    finally:
+        if file_path_to_cleanup:
+            cleanup_file(file_path_to_cleanup)
 
 
 @router.callback_query(F.data == "cancel_download")
 async def cancel_download(callback: CallbackQuery, state: FSMContext):
-    """Cancel download"""
-    await callback.message.edit_text(
-        "❌ Yuklash bekor qilindi.",
-        reply_markup=back_to_main_kb(),
-    )
-
-
-@router.callback_query(F.data == "download")
-async def callback_download(callback: CallbackQuery):
-    """Download button callback"""
-    await callback.message.edit_text(
-        f"📥 {bold('Video yuklash')}\n\n"
-        f"Ijtimoiy tarmoqdan video linkini yuboring.\n\n"
-        f"📱 Qo'llab-quvvatlanadi:\n"
-        f"  🎵 TikTok\n"
-        f"  📸 Instagram\n"
-        f"  ▶️ YouTube\n"
-        f"  📘 Facebook\n"
-        f"  🐦 X (Twitter)\n"
-        f"  📌 Pinterest\n"
-        f"  👻 Snapchat\n"
-        f"  🧵 Threads",
-        reply_markup=back_to_main_kb(),
-        parse_mode="HTML",
-    )
-
-
-async def _animate_loading(bot: Bot, message: Message):
-    """Animate loading message with clock emojis"""
-    step = 0
+    """Bekor qilish"""
     try:
-        while True:
-            await asyncio.sleep(1)
-            step += 1
-            text = format_loading_step(step)
-            try:
-                await message.edit_text(text)
-            except Exception:
-                break
-    except asyncio.CancelledError:
-        pass
+        await callback.message.edit_text("❌ Bekor qilindi.")
+    except Exception:
+        try:
+            await callback.answer("❌ Bekor qilindi")
+        except Exception:
+            pass
