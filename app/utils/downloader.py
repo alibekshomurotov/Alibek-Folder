@@ -1,4 +1,23 @@
+"""Video/Audio Downloader using yt-dlp + Invidious/Piped/InnerTube API
 
+STRATEGY for YouTube on datacenter IPs (Render, Heroku, etc.):
+1. FIRST try Cobalt API (own server)
+2. THEN try InnerTube API (YouTube's internal API)
+3. THEN try Invidious/Piped API - these work on residential IPs
+4. THEN try yt-dlp with PO Token + cookies + various player_client values
+5. If all fail, suggest residential proxy or PO Token
+
+For other platforms (TikTok, Instagram, etc.):
+- Use yt-dlp with cookies (for login-required content like Instagram Stories)
+- Instagram Stories: yt-dlp + cookies, with direct API fallback
+
+MUHIM O'ZGARISHLAR:
+- InnerTube API qo'shildi — YouTube'ning ichki API si orqali to'g'ridan-to'g'ri
+- PO Token qo'llab-quvvatlash — "Sign in to confirm you're not a bot" xatosini oldini oladi
+- Invidious proxy download — Invidious orqali proksi sifatida yuklash
+- Fast-fail logic — Bitta xato takrorlanmasligi, vaqtni tejash
+- Cookie auto-generation — yt-session-generator integratsiyasi
+"""
 
 import os
 import logging
@@ -924,23 +943,91 @@ async def extract_video_info(url: str) -> Optional[Dict[str, Any]]:
 async def _extract_youtube_info(url: str) -> Optional[Dict[str, Any]]:
     """YouTube video ma'lumotlarini olish.
 
-    STRATEGIYA:
-    1. Cobalt API - tez va ishonchli (o'z serverimiz)
-    2. InnerTube API - YouTube'ning ichki API si
-    3. Invidious/Piped API - alternative frontendlar
-    4. yt-dlp (1-2 urinish) - oxirgi chora, faqat PO Token bilan
+    STRATEGIYA (yt-dlp BIRINCHI):
+    1. yt-dlp po_token+web
+    2. yt-dlp cookies+ios / ios
+    3. API usullari (oxirgi chora): Cobalt → InnerTube → Invidious → Piped
     """
     global _bot_detection_count
 
     from app.utils.youtube_api import _extract_video_id
-
     video_id = _extract_video_id(url)
 
-    # === 1-BOSQICH: Cobalt API (o'z serverimiz) ===
+    # === 1-BOSQICH: yt-dlp birinchi ===
+    if _bot_detection_count < _bot_detection_threshold:
+        po_token = os.getenv("PO_TOKEN", "")
+        cookies_path = _find_cookies_file()
+        logger.info(f"[YouTube] yt-dlp info sinab ko'rilmoqda (PO Token: {'bor' if po_token else 'yo\'q'})...")
+
+        player_clients = []
+        if po_token:
+            player_clients.append(("po_token+web", {}))
+        if cookies_path:
+            player_clients.append(("cookies+ios", {"youtube": {"player_client": ["ios"]}}))
+        player_clients.append(("ios", {"youtube": {"player_client": ["ios"]}}))
+
+        for label, extractor_args in player_clients:
+            use_cookies = "cookies" in label
+            try:
+                opts = {
+                    "format": "all",
+                    "quiet": True,
+                    "no_warnings": True,
+                    "extract_flat": False,
+                    "noplaylist": True,
+                    "geo_bypass": "US",
+                    "geo_bypass_country": "US",
+                    "socket_timeout": 8,
+                }
+
+                if po_token:
+                    opts.setdefault("extractor_args", {}).setdefault("youtube", {})["po_token"] = f"web+{po_token}"
+
+                if extractor_args:
+                    for key, val in extractor_args.items():
+                        opts.setdefault("extractor_args", {}).setdefault(key, {}).update(val)
+
+                if use_cookies:
+                    opts["cookiefile"] = cookies_path
+
+                try:
+                    from app.utils.youtube_api import get_proxy_for_platform
+                    proxy = get_proxy_for_platform("youtube")
+                except ImportError:
+                    proxy = os.getenv("YOUTUBE_PROXY", "") or os.getenv("HTTP_PROXY", "") or os.getenv("HTTPS_PROXY", "")
+
+                if proxy:
+                    opts["proxy"] = proxy
+                else:
+                    opts["proxy"] = ""
+
+                logger.info(f"[YouTube] yt-dlp info: {label} (proxy: {'bor' if proxy else 'yo\'q'})")
+
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                    if info:
+                        formats = info.get("formats", [])
+                        if _has_video_audio(formats):
+                            logger.info(f"[YouTube] yt-dlp MUVOFAQIYATLI: {label}")
+                            _bot_detection_count = max(0, _bot_detection_count - 1)
+                            return info
+
+            except Exception as e:
+                err_str = str(e)
+                if _is_bot_detection_error(e):
+                    _bot_detection_count += 1
+                    logger.debug(f"[YouTube] yt-dlp {label}: Bot detektsiya")
+                else:
+                    logger.debug(f"[YouTube] yt-dlp {label}: {err_str[:80]}")
+                continue
+    else:
+        logger.warning(f"[YouTube] yt-dlp info o'tkazib yuborildi (bot detektsiya: {_bot_detection_count} marta)")
+
+    # === 2-BOSQICH: API usullari (oxirgi chora) ===
     cobalt_api_url = os.getenv("COBALT_API_URL", "")
 
     if cobalt_api_url:
-        logger.info(f"[YouTube] Cobalt orqali tekshirilmoqda: {cobalt_api_url}")
+        logger.info(f"[YouTube] Cobalt orqali tekshirilmoqda...")
         try:
             from app.utils.youtube_api import _try_cobalt
             cobalt_result = await _try_cobalt(url, "720", False)
@@ -965,15 +1052,10 @@ async def _extract_youtube_info(url: str) -> Optional[Dict[str, Any]]:
                     ],
                     "_cobalt_available": True,
                 }
-            else:
-                logger.info("[YouTube] Cobalt javob bermadi, keyingi usulga o'tilmoqda...")
         except Exception as e:
             logger.warning(f"[YouTube] Cobalt xatosi: {e}")
-    else:
-        logger.info("[YouTube] COBALT_API_URL o'rnatilmagan, Cobalt o'tkazib yuborildi")
 
-    # === 2-BOSQICH: InnerTube API (YouTube ichki API) ===
-    logger.info("[YouTube] InnerTube API orqali tekshirilmoqda...")
+    # InnerTube
     try:
         from app.utils.youtube_api import _try_innertube, convert_api_info_to_ytdlp
         innertube_result = await _try_innertube(video_id, "720", False)
@@ -985,9 +1067,7 @@ async def _extract_youtube_info(url: str) -> Optional[Dict[str, Any]]:
     except Exception as e:
         logger.warning(f"[YouTube] InnerTube xatosi: {e}")
 
-    # === 3-BOSQICH: Invidious/Piped API ===
-    # Cobalt va InnerTube allaqachon yuqorida sinab ko'rildi — takroriy so'rovlarni o'tkazib yuboramiz
-    logger.info("[YouTube] API orqali ma'lumot olinmoqda...")
+    # Invidious/Piped
     try:
         from app.utils.youtube_api import get_youtube_info_via_api, convert_api_info_to_ytdlp
         api_result = await get_youtube_info_via_api(url, skip_cobalt=True, skip_innertube=True)
@@ -997,96 +1077,8 @@ async def _extract_youtube_info(url: str) -> Optional[Dict[str, Any]]:
             if _has_video_audio(formats):
                 logger.info("[YouTube] API orqali MUVOFAQIYATLI!")
                 return info
-            else:
-                logger.warning("[YouTube] API orqali formatlar topilmadi")
     except Exception as e:
         logger.warning(f"[YouTube] API xatosi: {e}")
-
-    # === 4-BOSQICH: yt-dlp — faqat PO Token bilan yoki 1-2 marta ===
-    # Bot detektsiyasi juda ko'p bo'lsa, yt-dlp urinishlarini o'tkazib yuborish
-    if _bot_detection_count >= _bot_detection_threshold:
-        logger.warning(f"[YouTube] yt-dlp o'tkazib yuborildi (bot detektsiya: {_bot_detection_count} marta)")
-        return None
-
-    po_token = os.getenv("PO_TOKEN", "")
-    logger.info(f"[YouTube] yt-dlp sinab ko'rilmoqda (PO Token: {'bor' if po_token else 'yo\'q'})...")
-    cookies_path = _find_cookies_file()
-
-    # PO Token bilan 1-urinish, keyin cookiesiz 1-urinish
-    player_clients = []
-    if po_token:
-        # PO Token bor — web klient bilan ishlashi kerak
-        player_clients.append(("po_token+web", {}))
-    if cookies_path:
-        player_clients.append(("cookies+ios", {"youtube": {"player_client": ["ios"]}}))
-    player_clients.extend([
-        ("ios",     {"youtube": {"player_client": ["ios"]}}),
-    ])
-
-    for label, extractor_args in player_clients:
-        use_cookies = "cookies" in label
-        try:
-            opts = {
-                "format": "all",
-                "quiet": True,
-                "no_warnings": True,
-                "extract_flat": False,
-                "noplaylist": True,
-                "geo_bypass": "US",
-                "geo_bypass_country": "US",
-                "socket_timeout": 8,
-            }
-
-            # PO Token qo'shish
-            if po_token:
-                opts.setdefault("extractor_args", {}).setdefault("youtube", {})["po_token"] = f"web+{po_token}"
-
-            if extractor_args:
-                # Merge extractor_args
-                for key, val in extractor_args.items():
-                    opts.setdefault("extractor_args", {}).setdefault(key, {}).update(val)
-
-            if use_cookies:
-                opts["cookiefile"] = cookies_path
-
-            # Proxy — platformaga mos (YouTube uchun YOUTUBE_PROXY)
-            # MUHIM: proxy="" yozish kerak — aks holda yt-dlp HTTP_PROXY env dan o'qiydi!
-            proxy_active = False
-            try:
-                from app.utils.youtube_api import get_proxy_for_platform
-                proxy = get_proxy_for_platform("youtube")
-                if proxy:
-                    opts["proxy"] = proxy
-                    proxy_active = True
-                else:
-                    opts["proxy"] = ""  # Env dan proxy olmaslik uchun
-            except ImportError:
-                proxy = os.getenv("YOUTUBE_PROXY", "") or os.getenv("HTTP_PROXY", "") or os.getenv("HTTPS_PROXY", "")
-                if proxy:
-                    opts["proxy"] = proxy
-                    proxy_active = True
-                else:
-                    opts["proxy"] = ""
-
-            logger.info(f"[YouTube] yt-dlp info: {label} (proxy: {'bor' if proxy_active else 'yo\'q'})")
-
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-                if info:
-                    formats = info.get("formats", [])
-                    if _has_video_audio(formats):
-                        logger.info(f"[YouTube] yt-dlp MUVOFAQIYATLI: {label}")
-                        _bot_detection_count = max(0, _bot_detection_count - 1)  # Muvaffaqiyat — hisobni kamaytirish
-                        return info
-
-        except Exception as e:
-            err_str = str(e)
-            if _is_bot_detection_error(e):
-                _bot_detection_count += 1
-                logger.debug(f"[YouTube] yt-dlp {label}: Bot detektsiya")
-            else:
-                logger.debug(f"[YouTube] yt-dlp {label}: {err_str[:80]}")
-            continue
 
     logger.error("[YouTube] Barcha usullar muvaffaqiyatsiz")
     return None
@@ -1228,20 +1220,114 @@ async def _download_youtube(url: str, quality: str = "720",
                              audio_only: bool = False) -> Optional[Tuple[str, Dict[str, Any]]]:
     """YouTube videosini yuklab olish.
 
-    STRATEGIYA (yangilangan — takroriy so'rovlarsiz):
-    1. API usullari: Cobalt → InnerTube → Invidious proxy → Invidious → Piped
-       (barchasi youtube_api.py download_youtube_via_api da boshqariladi)
-    2. yt-dlp — oxirgi chora, PO Token bilan
-
-    Eslatma: Datacenter IP (Render, Heroku) da YouTube bloklaydi.
-    PO_TOKEN o'rnatish — eng samarali yechim!
-    Yoki o'z Cobalt serveringizni ishga tushiring va COBALT_API_URL qo'shing.
+    STRATEGIYA (yt-dlp BIRINCHI):
+    1. yt-dlp po_token+web — eng ishonchli
+    2. yt-dlp cookies+ios — cookies bilan
+    3. yt-dlp ios — cookiesiz
+    4. API usullari (oxirgi chora): Cobalt → InnerTube → Invidious → Piped
     """
     global _bot_detection_count
 
-    # === 1-BOSQICH: API usullari (Cobalt → InnerTube → Invidious → Piped) ===
-    # Bitta funktsiya orqali — takroriy so'rovlarsiz!
-    logger.info("[YouTube] API usullari sinab ko'rilmoqda...")
+    po_token = os.getenv("PO_TOKEN", "")
+    cookies_path = _find_cookies_file()
+    output_path = tempfile.mkdtemp()
+
+    # === 1-BOSQICH: yt-dlp birinchi ===
+    if _bot_detection_count < _bot_detection_threshold:
+        # PO Token bilan urinish — eng ishonchli
+        player_clients = []
+
+        if po_token:
+            player_clients.append(("po_token+web", {}))
+        if cookies_path:
+            player_clients.append(("cookies+ios", {"youtube": {"player_client": ["ios"]}}))
+        player_clients.append(("ios", {"youtube": {"player_client": ["ios"]}}))
+
+        for i, (label, extractor_args) in enumerate(player_clients):
+            use_cookies = "cookies" in label
+            try:
+                try:
+                    from app.utils.youtube_api import get_proxy_for_platform
+                    proxy = get_proxy_for_platform("youtube")
+                except ImportError:
+                    proxy = os.getenv("YOUTUBE_PROXY", "") or os.getenv("HTTP_PROXY", "") or os.getenv("HTTPS_PROXY", "")
+
+                logger.info(f"[YouTube] yt-dlp yuklash {i+1}/{len(player_clients)}: {label} (proxy: {'bor' if proxy else 'yo\'q'})")
+
+                opts = _build_download_opts(output_path, quality, audio_only, use_cookies, "best", "youtube")
+                opts["geo_bypass"] = "US"
+                opts["geo_bypass_country"] = "US"
+                opts["socket_timeout"] = 8
+
+                if po_token:
+                    opts.setdefault("extractor_args", {}).setdefault("youtube", {})["po_token"] = f"web+{po_token}"
+
+                if extractor_args:
+                    for key, val in extractor_args.items():
+                        opts.setdefault("extractor_args", {}).setdefault(key, {}).update(val)
+
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+
+                    if info is None:
+                        logger.warning(f"[YouTube] yt-dlp {label}: info qaytarmadi")
+                        continue
+
+                    file_path = ydl.prepare_filename(info)
+
+                    if audio_only and config.download.ffmpeg_available:
+                        base_path = os.path.splitext(file_path)[0]
+                        mp3_path = base_path + ".mp3"
+                        if os.path.exists(mp3_path):
+                            file_path = mp3_path
+
+                    if not os.path.exists(file_path):
+                        files = os.listdir(output_path)
+                        if files:
+                            file_path = os.path.join(output_path, files[0])
+                        else:
+                            logger.warning(f"[YouTube] yt-dlp {label}: fayl yaratmadi")
+                            continue
+
+                    file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+                    if file_size_mb > config.download.max_file_size_mb:
+                        logger.warning(f"[YouTube] Fayl juda katta: {file_size_mb:.1f}MB")
+                        try:
+                            os.remove(file_path)
+                        except OSError:
+                            pass
+                        return None
+
+                    logger.info(f"[YouTube] yt-dlp yuklash MUVOFAQIYATLI: {label}")
+                    _bot_detection_count = max(0, _bot_detection_count - 1)
+                    return file_path, info
+
+            except Exception as e:
+                err_str = str(e)
+                if "407" in err_str or "Proxy Authentication Required" in err_str:
+                    logger.warning(f"[YouTube] yt-dlp {label}: 407 Proxy Auth Required — proxy BUZILGAN!")
+                    try:
+                        from app.utils.youtube_api import _mark_proxy_broken
+                        _mark_proxy_broken("407 from yt-dlp")
+                    except ImportError:
+                        pass
+                    break
+                if "MaxDownloads" in str(type(e).__name__) or "MaxDownloads" in err_str:
+                    logger.warning("[YouTube] Fayl hajmi cheklovdan oshdi")
+                    return None
+                if _is_bot_detection_error(e):
+                    _bot_detection_count += 1
+                    logger.warning(f"[YouTube] yt-dlp {label}: Bot detektsiya (jami: {_bot_detection_count})")
+                    break
+                logger.warning(f"[YouTube] yt-dlp {label}: {err_str[:80]}")
+                continue
+    else:
+        logger.warning(
+            f"[YouTube] yt-dlp o'tkazib yuborildi (bot detektsiya: {_bot_detection_count} marta)"
+        )
+
+    # === 2-BOSQICH: API usullari (oxirgi chora) ===
+    logger.info("[YouTube] API usullari sinab ko'rilmoqda (oxirgi chora)...")
     try:
         from app.utils.youtube_api import download_youtube_via_api
         result = await download_youtube_via_api(url, quality, audio_only,
@@ -1251,122 +1337,6 @@ async def _download_youtube(url: str, quality: str = "720",
             return result
     except Exception as e:
         logger.warning(f"[YouTube] API yuklash xatosi: {e}")
-
-    # === 2-BOSQICH: yt-dlp orqali yuklash ===
-    # Bot detektsiyasi juda ko'p bo'lsa, yt-dlp urinishlarini o'tkazib yuborish
-    if _bot_detection_count >= _bot_detection_threshold:
-        logger.warning(
-            f"[YouTube] yt-dlp o'tkazib yuborildi (bot detektsiya: {_bot_detection_count} marta). "
-            f"PO_TOKEN o'rnatishni yoki residential proxy ishlatishni tavsiya etamiz."
-        )
-        return None
-
-    po_token = os.getenv("PO_TOKEN", "")
-    cookies_path = _find_cookies_file()
-    output_path = tempfile.mkdtemp()
-
-    # PO Token bilan urinish — eng ishonchli
-    # Keyin faqat 1-2 marta cookiesiz urinish
-    player_clients = []
-
-    if po_token:
-        # PO Token + web klient — eng ishonchli
-        player_clients.append(("po_token+web", {}))
-    if cookies_path:
-        player_clients.append(("cookies+ios", {"youtube": {"player_client": ["ios"]}}))
-    # Faqat 1 marta cookiesiz urinish (ko'p urinish behuda)
-    player_clients.append(("ios", {"youtube": {"player_client": ["ios"]}}))
-
-    for i, (label, extractor_args) in enumerate(player_clients):
-        use_cookies = "cookies" in label
-        try:
-            # Proxy — platformaga mos (YouTube uchun YOUTUBE_PROXY)
-            proxy_active = False
-            try:
-                from app.utils.youtube_api import get_proxy_for_platform
-                proxy = get_proxy_for_platform("youtube")
-            except ImportError:
-                proxy = os.getenv("YOUTUBE_PROXY", "") or os.getenv("HTTP_PROXY", "") or os.getenv("HTTPS_PROXY", "")
-
-            logger.info(f"[YouTube] yt-dlp yuklash {i+1}/{len(player_clients)}: {label} (proxy: {'bor' if proxy else 'yo\'q'})")
-
-            opts = _build_download_opts(output_path, quality, audio_only, use_cookies, "best", "youtube")
-            opts["geo_bypass"] = "US"
-            opts["geo_bypass_country"] = "US"
-            opts["socket_timeout"] = 8
-
-            # _build_download_opts allaqachon proxy="" yoki proxy=URL qo'ydi
-            # proxy="" — yt-dlp env dan ham proxy olmaydi (MUHIM!)
-            # Agar proxy bor bo'lsa, opts["proxy"] = proxy_url bo'ladi
-            # Agar proxy yo'q/buzilgan bo'lsa, opts["proxy"] = "" bo'ladi
-
-            # PO Token qo'shish
-            if po_token:
-                opts.setdefault("extractor_args", {}).setdefault("youtube", {})["po_token"] = f"web+{po_token}"
-
-            if extractor_args:
-                # Merge extractor_args
-                for key, val in extractor_args.items():
-                    opts.setdefault("extractor_args", {}).setdefault(key, {}).update(val)
-
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-
-                if info is None:
-                    logger.warning(f"[YouTube] yt-dlp {label}: info qaytarmadi")
-                    continue
-
-                file_path = ydl.prepare_filename(info)
-
-                if audio_only and config.download.ffmpeg_available:
-                    base_path = os.path.splitext(file_path)[0]
-                    mp3_path = base_path + ".mp3"
-                    if os.path.exists(mp3_path):
-                        file_path = mp3_path
-
-                if not os.path.exists(file_path):
-                    files = os.listdir(output_path)
-                    if files:
-                        file_path = os.path.join(output_path, files[0])
-                    else:
-                        logger.warning(f"[YouTube] yt-dlp {label}: fayl yaratmadi")
-                        continue
-
-                # Fayl hajmini tekshirish
-                file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-                if file_size_mb > config.download.max_file_size_mb:
-                    logger.warning(f"[YouTube] Fayl juda katta: {file_size_mb:.1f}MB")
-                    try:
-                        os.remove(file_path)
-                    except OSError:
-                        pass
-                    return None
-
-                logger.info(f"[YouTube] yt-dlp yuklash MUVOFAQIYATLI: {label}")
-                _bot_detection_count = max(0, _bot_detection_count - 1)  # Muvaffaqiyat — hisobni kamaytirish
-                return file_path, info
-
-        except Exception as e:
-            err_str = str(e)
-            # 407 Proxy Auth Required — proxy ni buzilgan deb belgilash va keyingi urinishlarni to'xtatish
-            if "407" in err_str or "Proxy Authentication Required" in err_str:
-                logger.warning(f"[YouTube] yt-dlp {label}: 407 Proxy Auth Required — proxy BUZILGAN!")
-                try:
-                    from app.utils.youtube_api import _mark_proxy_broken
-                    _mark_proxy_broken("407 from yt-dlp")
-                except ImportError:
-                    pass
-                break  # Proxy buzilgan — keyingi urinishlar ham ishlamaydi
-            if "MaxDownloads" in str(type(e).__name__) or "MaxDownloads" in err_str:
-                logger.warning("[YouTube] Fayl hajmi cheklovdan oshdi")
-                return None
-            if _is_bot_detection_error(e):
-                _bot_detection_count += 1
-                logger.warning(f"[YouTube] yt-dlp {label}: Bot detektsiya (jami: {_bot_detection_count})")
-                # Bot detektsiyasi bo'lsa, keyingi klientlarni ham o'tkazib yuborish
-                break  # Boshqa klientlar ham ishlamaydi
-            logger.warning(f"[YouTube] yt-dlp {label}: {err_str[:80]}")
-            continue
 
     logger.error("[YouTube] Barcha yuklash usullari muvaffaqiyatsiz")
     return None
