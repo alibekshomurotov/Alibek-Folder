@@ -1,5 +1,3 @@
-"""Video Handler — Stiker animatsiya + video yuklash"""
-
 import asyncio
 import hashlib
 import logging
@@ -20,7 +18,10 @@ logger = logging.getLogger(__name__)
 
 router = Router()
 
+# MP3 uchun URL cache
 _url_cache: Dict[str, str] = {}
+
+# Stikerlar (startup da to'ldiriladi)
 _hourglass_stickers: List[str] = []
 
 
@@ -51,8 +52,11 @@ async def _validate_sticker(bot: Bot, file_id: str) -> bool:
     """Stiker file_id ni tekshirish — haqiqiy stiker ekanligini tasdiqlash."""
     try:
         file = await bot.get_file(file_id)
+        # Telegram stikerlar always .webp (yoki tgs) kengaytmasiga ega
         if file.file_path and (file.file_path.endswith('.webp') or file.file_path.endswith('.tgs')):
             return True
+        # file_path None bo'lishi mumkin — unda file_id formatidan tekshiramiz
+        # Thumbnail file_id lari boshqa formatda bo'ladi
         return False
     except Exception as e:
         logger.debug(f"Stiker tekshirish xatosi: {e}")
@@ -63,24 +67,27 @@ async def load_hourglass_stickers(bot: Bot):
     """Bot ishga tushganda stikerlarni yuklash."""
     global _hourglass_stickers
 
+    # 1-prioritet: env var (admin Render'da qo'ygan HOURGLASS_STICKERS)
     env_stickers = os.getenv("HOURGLASS_STICKERS", "")
     if env_stickers:
         ids = [s.strip() for s in env_stickers.split(",") if s.strip()]
         if ids:
+            # HAR BIR stikerni tekshiramiz — haqiqiy stiker ekanligini tasdiqlash
             valid_ids = []
             for sid in ids:
                 if await _validate_sticker(bot, sid):
                     valid_ids.append(sid)
                 else:
-                    logger.warning(f"⚠️ Stiker '{sid[:20]}...' NOTO'G'RI — bu stiker emas")
+                    logger.warning(f"⚠️ Stiker '{sid[:20]}...' NOTO'G'RI — bu stiker emas (thumbnail/rasm bolishi mumkin)")
             if valid_ids:
                 _hourglass_stickers = valid_ids
                 logger.info(f"✅ Stikerlar env dan yuklandi ({len(valid_ids)}/{len(ids)} ta to'g'ri)")
                 return
             else:
                 logger.error(f"❌ HOURGLASS_STICKERS da {len(ids)} ta file_id bor, lekin HECH biri stiker emas!")
-                logger.error(f"❌ Iltimos, ANIMATED WEBP stiker file_id ni yuboring")
+                logger.error(f"❌ Iltimos, ANIMATED WEBP stiker file_id ni yuboring. Qanday qilish: stikerni botga forward qiling")
 
+    # 2-prioritet: Telegram stiker setlarini qidirish
     sets_to_try = [
         "hourglass_animated",
         "loadinganimation",
@@ -109,6 +116,7 @@ async def _animate_sticker(bot: Bot, chat_id: int, message_id: int, stop_event: 
     if not _hourglass_stickers:
         return
 
+    # Agar faqat 1 stiker bo'lsa — o'chirib qayta yuborib animatsiyani takrorlaymiz
     if len(_hourglass_stickers) == 1:
         sticker_id = _hourglass_stickers[0]
         try:
@@ -116,10 +124,12 @@ async def _animate_sticker(bot: Bot, chat_id: int, message_id: int, stop_event: 
                 await asyncio.sleep(3.0)
                 if stop_event.is_set():
                     break
+                # Eski stikerni o'chirish
                 try:
                     await bot.delete_message(chat_id=chat_id, message_id=message_id)
                 except Exception:
                     return
+                # Yangi stiker yuborish (animatsiya qayta boshlanadi)
                 if not stop_event.is_set():
                     try:
                         new_msg = await bot.send_sticker(chat_id, sticker_id)
@@ -130,6 +140,7 @@ async def _animate_sticker(bot: Bot, chat_id: int, message_id: int, stop_event: 
             pass
         return
 
+    # Ko'p stiker bo'lsa — edit_message_media bilan almashtirish
     idx = 0
     try:
         while not stop_event.is_set():
@@ -193,8 +204,10 @@ async def _start_animation(bot: Bot, chat_id: int):
             return stop_event, task, msg
         except Exception as e:
             logger.warning(f"Stiker yuborish xatosi: {e}, matn animatsiyaga o'tish")
+            # Stiker ishlamasa — ro'yxatdan olib tashlaymiz
             _hourglass_stickers.clear()
 
+    # Fallback: matn animatsiya
     try:
         msg = await bot.send_message(chat_id, "⏳ Video yuklanmoqda . . .")
         task = asyncio.create_task(_animate_text(bot, chat_id, msg.message_id, stop_event))
@@ -222,7 +235,7 @@ async def _stop_animation(bot: Bot, stop_event, task, msg):
 
 @router.message(F.text)
 async def handle_video_link(message: Message, state: FSMContext):
-    """Link yuborilsa: stiker animatsiya → video."""
+    """Link yuborilsa: stiker animatsiya → video (BACKGROUND — handler DARHOL qaytadi)."""
     from app.utils.helpers import extract_url_from_text as extract_url
 
     url = extract_url(message.text or "")
@@ -231,6 +244,7 @@ async def handle_video_link(message: Message, state: FSMContext):
     if not is_video_url(url):
         return
 
+    # Foydalanuvchini background'da ro'yxatdan o'tkazish
     asyncio.create_task(
         _register_user_bg(
             message.from_user.id,
@@ -239,20 +253,36 @@ async def handle_video_link(message: Message, state: FSMContext):
         )
     )
 
-    stop_event, anim_task, anim_msg = await _start_animation(message.bot, message.chat.id)
+    # BUTUN yuklash + yuborish jarayonini BACKGROUND task ga yuboramiz
+    # → Handler DARHOL qaytadi → /start va boshqa buyruqlar hech qachon bloklanmaydi
+    asyncio.create_task(
+        _process_video_bg(
+            bot=message.bot,
+            chat_id=message.chat.id,
+            user_id=message.from_user.id,
+            url=url,
+        )
+    )
+
+
+async def _process_video_bg(bot: Bot, chat_id: int, user_id: int, url: str):
+    """Video yuklash + yuborish — to'liq background. Event loop bloklanmaydi."""
+    # Animatsiya boshlash
+    stop_event, anim_task, anim_msg = await _start_animation(bot, chat_id)
 
     try:
         result = await DownloadService.download(
             url=url,
             quality="720p",
             audio_only=False,
-            user_id=message.from_user.id,
+            user_id=user_id,
         )
 
-        await _stop_animation(message.bot, stop_event, anim_task, anim_msg)
+        # Animatsiyani to'xtatib o'chirish
+        await _stop_animation(bot, stop_event, anim_task, anim_msg)
 
         if result is None:
-            await message.answer(format_error("download_error"), parse_mode="HTML")
+            await bot.send_message(chat_id, format_error("download_error"), parse_mode="HTML")
             return
 
         file_path = result["file_path"]
@@ -264,42 +294,45 @@ async def handle_video_link(message: Message, state: FSMContext):
 
         try:
             if file_size_mb > config.download.max_file_size_mb:
-                await message.answer_document(
+                await bot.send_document(
+                    chat_id=chat_id,
                     document=FSInputFile(file_path),
                     caption=caption,
                     reply_markup=kb,
                 )
             else:
                 try:
-                    await message.answer_video(
+                    await bot.send_video(
+                        chat_id=chat_id,
                         video=FSInputFile(file_path),
                         caption=caption,
                         reply_markup=kb,
                     )
                 except Exception:
-                    await message.answer_document(
+                    await bot.send_document(
+                        chat_id=chat_id,
                         document=FSInputFile(file_path),
                         caption=caption,
                         reply_markup=kb,
                     )
         except Exception as e:
             logger.error(f"Error sending file: {e}")
-            await message.answer(format_error("server_error"), parse_mode="HTML")
+            await bot.send_message(chat_id, format_error("server_error"), parse_mode="HTML")
         finally:
             cleanup_file(file_path)
 
     except Exception as e:
-        await _stop_animation(message.bot, stop_event, anim_task, anim_msg)
+        await _stop_animation(bot, stop_event, anim_task, anim_msg)
         logger.error(f"Error processing video: {e}")
         try:
-            await message.answer(format_error("server_error"), parse_mode="HTML")
+            await bot.send_message(chat_id, format_error("server_error"), parse_mode="HTML")
         except Exception:
             pass
 
 
 @router.callback_query(F.data.startswith("mp3_"))
 async def handle_mp3_download(callback: CallbackQuery, state: FSMContext):
-    """MP3 yuklash."""
+    """MP3 yuklash (BACKGROUND — handler DARHOL qaytadi)."""
     cache_key = callback.data.replace("mp3_", "")
     url = _url_cache.get(cache_key)
 
@@ -309,34 +342,44 @@ async def handle_mp3_download(callback: CallbackQuery, state: FSMContext):
 
     await callback.answer("MP3 yuklanmoqda...")
 
-    stop_event, anim_task, anim_msg = await _start_animation(
-        callback.bot, callback.message.chat.id
+    # BUTUN MP3 yuklashni background ga yuboramiz
+    asyncio.create_task(
+        _process_mp3_bg(
+            bot=callback.bot,
+            chat_id=callback.message.chat.id,
+            user_id=callback.from_user.id,
+            url=url,
+        )
     )
+
+
+async def _process_mp3_bg(bot: Bot, chat_id: int, user_id: int, url: str):
+    """MP3 yuklash + yuborish — to'liq background."""
+    stop_event, anim_task, anim_msg = await _start_animation(bot, chat_id)
 
     try:
         result = await DownloadService.download(
             url=url,
             quality="720p",
             audio_only=True,
-            user_id=callback.from_user.id,
+            user_id=user_id,
         )
 
-        await _stop_animation(callback.bot, stop_event, anim_task, anim_msg)
+        await _stop_animation(bot, stop_event, anim_task, anim_msg)
 
         if result is None:
-            await callback.message.answer(format_error("download_error"), parse_mode="HTML")
+            await bot.send_message(chat_id, format_error("download_error"), parse_mode="HTML")
             return
 
         file_path = result["file_path"]
-        await callback.message.answer_audio(
+        await bot.send_audio(
+            chat_id=chat_id,
             audio=FSInputFile(file_path),
             caption="@UzVideoSaveBot",
         )
         cleanup_file(file_path)
 
     except Exception as e:
-        await _stop_animation(callback.bot, stop_event, anim_task, anim_msg)
+        await _stop_animation(bot, stop_event, anim_task, anim_msg)
         logger.error(f"MP3 download error: {e}")
-        await callback.message.answer(format_error("server_error"), parse_mode="HTML")
-
-    await callback.answer()
+        await bot.send_message(chat_id, format_error("server_error"), parse_mode="HTML")

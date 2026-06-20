@@ -1,3 +1,4 @@
+import asyncio
 import os
 import logging
 import re
@@ -343,6 +344,34 @@ def _build_base_opts(use_cookies: bool = True, platform: str = "youtube") -> Dic
         opts["proxy"] = ""  # env dan proxy olmaslik uchun
 
     return opts
+
+
+def _ytdlp_extract_sync(opts: dict, url: str, download: bool = False):
+    """yt-dlp ni SEPARATE THREAD da ishga tushirish — event loop bloklanmasligi uchun."""
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        return ydl.extract_info(url, download=download)
+
+
+def _ytdlp_extract_and_get_path_sync(opts: dict, url: str, output_path: str,
+                                        audio_only: bool = False) -> Optional[Tuple[str, Dict[str, Any]]]:
+    """yt-dlp yuklab olish + fayl yo'lini qaytarish (thread uchun)."""
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        if info is None:
+            return None
+        file_path = ydl.prepare_filename(info)
+        if audio_only and config.download.ffmpeg_available:
+            base_path = os.path.splitext(file_path)[0]
+            mp3_path = base_path + ".mp3"
+            if os.path.exists(mp3_path):
+                file_path = mp3_path
+        if not os.path.exists(file_path):
+            files = os.listdir(output_path)
+            if files:
+                file_path = os.path.join(output_path, files[0])
+            else:
+                return None
+        return file_path, info
 
 
 def _build_download_opts(output_path: str, quality: str = "720",
@@ -848,28 +877,27 @@ async def _auto_generate_cookies() -> Optional[str]:
 async def _extract_youtube_info(url: str) -> Optional[Dict[str, Any]]:
     """YouTube video ma'lumotlarini olish.
 
-    STRATEGIYA (soddalashtirilgan — tezkor):
-    1. yt-dlp + PO_TOKEN + SOCKS5 proxy (5-10 soniya)
-    2. yt-dlp + cookies + ios (fallback)
-    3. yt-dlp + ios (fallback)
-
-    Cobalt/InnerTube/Invidious/Piped — OLIB TASHLANDI (hammasi ishlamaydi).
+    RENDER STRATEGIYASI — proxy birinchi (Render IP YouTube tomonidan bloklanadi):
+    1. yt-dlp + cookies + ios + proxy — 5-15 soniya
+    2. yt-dlp + PO_TOKEN + proxy — 5-15 soniya
+    3. yt-dlp + ios + proxy — 5-15 soniya
+    4. PROXYSIZ fallback (CDN ishlaydi degan umidda) — 10 soniya timeout
     """
     global _bot_detection_count
 
     po_token = os.getenv("PO_TOKEN", "")
     cookies_path = _find_cookies_file()
+    proxy = _get_youtube_proxy()
 
-    # Urinishlar ro'yxati
-    player_clients = []
-    if po_token:
-        player_clients.append(("po_token+web", {}))
+    # === 1-FAZA: PROXY BILAN (Render uchun majburiy) ===
+    proxy_clients = []
     if cookies_path:
-        player_clients.append(("cookies+ios", {"youtube": {"player_client": ["ios"]}}))
-    player_clients.append(("ios", {"youtube": {"player_client": ["ios"]}}))
+        proxy_clients.append(("cookies+ios", {"youtube": {"player_client": ["ios"]}}, True))
+    if po_token:
+        proxy_clients.append(("po_token+web", {}, False))
+    proxy_clients.append(("ios", {"youtube": {"player_client": ["ios"]}}, False))
 
-    for label, extractor_args in player_clients:
-        use_cookies = "cookies" in label
+    for label, extractor_args, use_cookies in proxy_clients:
         try:
             opts = {
                 "format": "all",
@@ -879,50 +907,70 @@ async def _extract_youtube_info(url: str) -> Optional[Dict[str, Any]]:
                 "noplaylist": True,
                 "geo_bypass": "US",
                 "geo_bypass_country": "US",
-                # === Tuzatildi: 8 → 120 ===
-                "socket_timeout": 120,
+                "socket_timeout": 30,
             }
 
-            # PO Token
+            if proxy:
+                opts["proxy"] = proxy
+
             if po_token:
                 opts.setdefault("extractor_args", {}).setdefault("youtube", {})["po_token"] = f"web+{po_token}"
 
-            # Extractor args
             if extractor_args:
                 for key, val in extractor_args.items():
                     opts.setdefault("extractor_args", {}).setdefault(key, {}).update(val)
 
-            if use_cookies:
+            if use_cookies and cookies_path:
                 opts["cookiefile"] = cookies_path
 
-            # Proxy — to'g'ridan-to'g'ri env var
-            proxy = _get_youtube_proxy()
-            if proxy:
-                opts["proxy"] = proxy
-            else:
-                opts["proxy"] = ""
+            logger.info(f"[YouTube] info (proxy): {label}")
 
-            proxy_status = "bor" if proxy else "yo'q"
-            logger.info(f"[YouTube] yt-dlp info: {label} (proxy: {proxy_status})")
-
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-                if info:
-                    formats = info.get("formats", [])
-                    if _has_video_audio(formats):
-                        logger.info(f"[YouTube] yt-dlp MUVOFAQIYATLI: {label}")
-                        _bot_detection_count = max(0, _bot_detection_count - 1)
-                        return info
+            info = await asyncio.to_thread(_ytdlp_extract_sync, opts, url, False)
+            if info:
+                formats = info.get("formats", [])
+                if _has_video_audio(formats):
+                    logger.info(f"[YouTube] info OK: {label}")
+                    _bot_detection_count = max(0, _bot_detection_count - 1)
+                    return info
 
         except Exception as e:
             if _is_bot_detection_error(e):
                 _bot_detection_count += 1
-                logger.debug(f"[YouTube] yt-dlp {label}: Bot detektsiya")
+                logger.debug(f"[YouTube] info {label}: Bot detektsiya")
             else:
-                logger.debug(f"[YouTube] yt-dlp {label}: {str(e)[:80]}")
+                logger.debug(f"[YouTube] info {label}: {str(e)[:80]}")
             continue
 
-    logger.error("[YouTube] Barcha usullar muvaffaqiyatsiz")
+    # === 2-FAZA: PROXYSIZ (faqat 1 ta urinish, 10s timeout — CDN ishlaydi degan umid) ===
+    logger.info("[YouTube] Proxy bilan info muvaffaqiyatsiz, proxy'siz 1 urinish...")
+    try:
+        opts = {
+            "format": "all",
+            "quiet": True,
+            "no_warnings": True,
+            "extract_flat": False,
+            "noplaylist": True,
+            "geo_bypass": "US",
+            "geo_bypass_country": "US",
+            "socket_timeout": 10,
+            "proxy": "",
+        }
+        if cookies_path:
+            opts["cookiefile"] = cookies_path
+        if po_token:
+            opts.setdefault("extractor_args", {}).setdefault("youtube", {})["po_token"] = f"web+{po_token}"
+
+        info = await asyncio.to_thread(_ytdlp_extract_sync, opts, url, False)
+        if info:
+            formats = info.get("formats", [])
+            if _has_video_audio(formats):
+                logger.info("[YouTube] info OK: proxy'siz")
+                _bot_detection_count = max(0, _bot_detection_count - 1)
+                return info
+    except Exception as e:
+        logger.debug(f"[YouTube] info proxy'siz: {str(e)[:80]}")
+
+    logger.error("[YouTube] Barcha info usullari muvaffaqiyatsiz")
     return None
 
 
@@ -1009,10 +1057,9 @@ async def _extract_non_youtube_info(url: str, platform: str) -> Optional[Dict[st
                 label = "cookies+graphql"
             logger.info(f"[{platform}] Ma'lumot olinmoqda: {label}")
 
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-                if info:
-                    return info
+            info = await asyncio.to_thread(_ytdlp_extract_sync, opts, url, False)
+            if info:
+                return info
 
         except Exception as e:
             err_str = str(e)
@@ -1048,13 +1095,10 @@ async def _download_youtube(url: str, quality: str = "720",
                              audio_only: bool = False) -> Optional[Tuple[str, Dict[str, Any]]]:
     """YouTube videosini yuklab olish.
 
-    TEZLASHGAN STRATEGIYA (2 bosqich):
-    1. INFO: proxy orqali (IP blokirovkasi oldini olish) — 5-10 soniya
-    2. YUKLASH: proxy'siz to'g'ridan-to'g'ri (tez!) — video fayllar uchun proxy kerak emas
-
-    Proxy faqat metadata/info olishda ishlatiladi (kichik JSON so'rov).
-    Video faylning o'zi YouTube CDN orqali yuklanadi — proxy orqali yuklash
-    SOCKS5 da 10x sekin bo'ladi (chunki butun fayl proxy server orqali o'tadi).
+    RENDER STRATEGIYASI (proxy majburiy):
+    1. INFO: proxy orqali — 5-15 soniya
+    2. YUKLASH: proxy bilan (CDN ham blok bo'lishi mumkin) — 10-60 soniya
+    3. FALLBACK: proxy'siz 15s timeout (CDN ishlasa tez) — 15 soniya
     """
     global _bot_detection_count
 
@@ -1067,9 +1111,10 @@ async def _download_youtube(url: str, quality: str = "720",
 
     po_token = os.getenv("PO_TOKEN", "")
     cookies_path = _find_cookies_file()
+    proxy = _get_youtube_proxy()
     output_path = tempfile.mkdtemp()
 
-    # === 1-BO SQICH: Info olish (PROXY bilan — IP blokirovkasi uchun) ===
+    # === 1-BO SQICH: Info olish (proxy bilan) ===
     info = await _extract_youtube_info(url)
     if not info:
         logger.error("[YouTube] Info olinmadi — yuklab bo'lmaydi")
@@ -1080,153 +1125,85 @@ async def _download_youtube(url: str, quality: str = "720",
         logger.error("[YouTube] Formatlar topilmadi")
         return None
 
-    # === 2-BO SQICH: Fayl yuklash (PROXYSIZ — tez!) ===
+    # === 2-BO SQICH: Fayl yuklash ===
     fmt = get_format_selector(quality, audio_only)
 
-    download_opts = {
-        "format": fmt,
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
-        "outtmpl": os.path.join(output_path, "%(id)s.%(ext)s"),
-        "socket_timeout": 120,
-        "retries": 5,
-        "fragment_retries": 10,
-        "file_access_retries": 5,
-        "throttledratelimit": 100000,
-        "concurrent_fragment_downloads": 8,
-        "buffersize": 16384,
-        "http_chunk_size": 10485760,
-        # MUHIM: yuklashda proxy YO'Q — to'g'ridan-to'g'ri YouTube CDN
-        "proxy": "",
-    }
+    # --- Urinish 1: PROXY BILAN (asosiy) ---
+    download_opts = _build_download_opts(output_path, quality, audio_only, True, fmt, "youtube")
+    download_opts["format"] = fmt
+    download_opts["geo_bypass"] = "US"
+    download_opts["geo_bypass_country"] = "US"
+    download_opts["socket_timeout"] = 60
+    download_opts["retries"] = 3
+    download_opts["fragment_retries"] = 5
+    download_opts["throttledratelimit"] = 100000
+    download_opts["concurrent_fragment_downloads"] = 4
+    download_opts["http_chunk_size"] = 10485760
+    if proxy:
+        download_opts["proxy"] = proxy
 
-    if config.download.ffmpeg_available and "+" in fmt:
-        download_opts["merge_output_format"] = "mp4"
+    if po_token:
+        download_opts.setdefault("extractor_args", {}).setdefault("youtube", {})["po_token"] = f"web+{po_token}"
 
-    if audio_only and config.download.ffmpeg_available:
-        download_opts["postprocessors"] = [{
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": "mp3",
-            "preferredquality": "192",
-        }]
-
-    # Cookies fayl yuklashda ham kerak bo'lishi mumkin (premium video)
-    if cookies_path:
-        download_opts["cookiefile"] = cookies_path
-
-    logger.info(f"[YouTube] YUKLASH boshlandi (proxy'siz, tez rejim) format={quality}p audio={audio_only}")
+    logger.info(f"[YouTube] YUKLASH boshlandi (proxy) format={quality}p audio={audio_only}")
 
     try:
-        with yt_dlp.YoutubeDL(download_opts) as ydl:
-            # info ni qayta extract_info qilmasdan, to'g'ridan-to'g'ri download
-            info = ydl.extract_info(url, download=True)
-
-            if info is None:
-                logger.warning("[YouTube] Yuklash: info qaytarmadi")
-                return None
-
-            file_path = ydl.prepare_filename(info)
-
-            if audio_only and config.download.ffmpeg_available:
-                base_path = os.path.splitext(file_path)[0]
-                mp3_path = base_path + ".mp3"
-                if os.path.exists(mp3_path):
-                    file_path = mp3_path
-
-            if not os.path.exists(file_path):
-                files = os.listdir(output_path)
-                if files:
-                    file_path = os.path.join(output_path, files[0])
-                else:
-                    logger.warning("[YouTube] Yuklash: fayl yaratmadi")
-                    return None
-
+        result = await asyncio.to_thread(
+            _ytdlp_extract_and_get_path_sync, download_opts, url, output_path, audio_only
+        )
+        if result is not None:
+            file_path, info = result
             file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-            if file_size_mb > config.download.max_file_size_mb:
-                logger.warning(f"[YouTube] Fayl juda katta: {file_size_mb:.1f}MB")
-                try:
-                    os.remove(file_path)
-                except OSError:
-                    pass
-                return None
-
-            logger.info(f"[YouTube] Yuklash MUVOFAQIYATLI: {file_size_mb:.1f}MB (proxy'siz)")
-            _bot_detection_count = max(0, _bot_detection_count - 1)
-            return file_path, info
+            if file_size_mb <= config.download.max_file_size_mb:
+                logger.info(f"[YouTube] Yuklash OK: {file_size_mb:.1f}MB (proxy)")
+                _bot_detection_count = max(0, _bot_detection_count - 1)
+                return file_path, info
+            # Fayl katta — o'chirib past sifatda qayta urinamiz (download_video_auto_quality)
+            logger.warning(f"[YouTube] Fayl katta: {file_size_mb:.1f}MB")
+            try:
+                os.remove(file_path)
+            except OSError:
+                pass
+            return None  # Pasaytirish uchun None qaytaramiz
 
     except Exception as e:
         err_str = str(e)
         if "MaxDownloads" in str(type(e).__name__) or "MaxDownloads" in err_str:
-            logger.warning("[YouTube] Fayl hajmi cheklovdan oshdi")
             return None
         if _is_bot_detection_error(e):
             _bot_detection_count += 1
-            logger.warning(f"[YouTube] Bot detektsiya yuklashda (jami: {_bot_detection_count})")
+            logger.warning(f"[YouTube] Bot detektsiya (jami: {_bot_detection_count})")
         else:
-            logger.warning(f"[YouTube] Yuklash xatosi: {err_str[:100]}")
+            logger.warning(f"[YouTube] Proxy yuklash xatosi: {err_str[:100]}")
 
-    # === FALLBACK: proxy bilan yuklash (to'g'ridan-to'g'ri ishlamasa) ===
-    logger.info("[YouTube] Proxy'siz yuklash muvaffaqiyatsiz, proxy bilan qayta urinilmoqda...")
-
-    player_clients = []
+    # --- Urinish 2: PROXYSIZ (CDN ishlasa tez — 15s timeout) ---
+    logger.info("[YouTube] Proxy yuklash muvaffaqiyatsiz, proxy'siz 1 urinish (15s)...")
+    dl_opts2 = _build_download_opts(output_path, quality, audio_only, True, fmt, "youtube")
+    dl_opts2["format"] = fmt
+    dl_opts2["socket_timeout"] = 15
+    dl_opts2["retries"] = 1
+    dl_opts2["fragment_retries"] = 2
+    dl_opts2["proxy"] = ""  # PROXYSIZ
     if po_token:
-        player_clients.append(("po_token+web", {}))
-    if cookies_path:
-        player_clients.append(("cookies+ios", {"youtube": {"player_client": ["ios"]}}))
-    player_clients.append(("ios", {"youtube": {"player_client": ["ios"]}}))
+        dl_opts2.setdefault("extractor_args", {}).setdefault("youtube", {})["po_token"] = f"web+{po_token}"
 
-    for i, (label, extractor_args) in enumerate(player_clients):
-        use_cookies = "cookies" in label
-        try:
-            opts = _build_download_opts(output_path, quality, audio_only, use_cookies, "best", "youtube")
-            opts["geo_bypass"] = "US"
-            opts["geo_bypass_country"] = "US"
-            opts["socket_timeout"] = 120
-
-            if po_token:
-                opts.setdefault("extractor_args", {}).setdefault("youtube", {})["po_token"] = f"web+{po_token}"
-
-            if extractor_args:
-                for key, val in extractor_args.items():
-                    opts.setdefault("extractor_args", {}).setdefault(key, {}).update(val)
-
-            logger.info(f"[YouTube] Fallback yuklash {i+1}/{len(player_clients)}: {label}")
-
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                if info is None:
-                    continue
-
-                file_path = ydl.prepare_filename(info)
-                if audio_only and config.download.ffmpeg_available:
-                    base_path = os.path.splitext(file_path)[0]
-                    mp3_path = base_path + ".mp3"
-                    if os.path.exists(mp3_path):
-                        file_path = mp3_path
-
-                if not os.path.exists(file_path):
-                    files = os.listdir(output_path)
-                    if files:
-                        file_path = os.path.join(output_path, files[0])
-                    else:
-                        continue
-
-                file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-                logger.info(f"[YouTube] Fallback yuklash MUVOFAQIYATLI: {label} ({file_size_mb:.1f}MB)")
-                _bot_detection_count = max(0, _bot_detection_count - 1)
+    try:
+        result = await asyncio.to_thread(
+            _ytdlp_extract_and_get_path_sync, dl_opts2, url, output_path, audio_only
+        )
+        if result is not None:
+            file_path, info = result
+            file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+            if file_size_mb <= config.download.max_file_size_mb:
+                logger.info(f"[YouTube] Yuklash OK: {file_size_mb:.1f}MB (proxy'siz!)")
                 return file_path, info
-
-        except Exception as e:
-            err_str = str(e)
-            if "407" in err_str or "Proxy Authentication Required" in err_str:
-                logger.warning(f"[YouTube] 407 Proxy Auth Required — proxy BUZILGAN!")
-                break
-            if _is_bot_detection_error(e):
-                _bot_detection_count += 1
-                break
-            logger.warning(f"[YouTube] Fallback {label}: {err_str[:80]}")
-            continue
+            try:
+                os.remove(file_path)
+            except OSError:
+                pass
+            return None
+    except Exception as e:
+        logger.debug(f"[YouTube] Proxysiz yuklash: {str(e)[:80]}")
 
     logger.error("[YouTube] Barcha yuklash usullari muvaffaqiyatsiz")
     return None
@@ -1262,24 +1239,13 @@ async def _download_non_youtube(url: str, quality: str, audio_only: bool) -> Opt
 
                 logger.info(f"[{platform}] Story: yt-dlp fallback...")
 
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    info = ydl.extract_info(url, download=True)
-                    if info:
-                        file_path = ydl.prepare_filename(info)
-                        if audio_only and config.download.ffmpeg_available:
-                            base_path = os.path.splitext(file_path)[0]
-                            mp3_path = base_path + ".mp3"
-                            if os.path.exists(mp3_path):
-                                file_path = mp3_path
-                        if not os.path.exists(file_path):
-                            files = os.listdir(output_path)
-                            if files:
-                                file_path = os.path.join(output_path, files[0])
-                            else:
-                                file_path = None
-                        if file_path:
-                            logger.info(f"[{platform}] Story yt-dlp MUVOFAQIYATLI!")
-                            return file_path, info
+                result = await asyncio.to_thread(
+                    _ytdlp_extract_and_get_path_sync, opts, url, output_path, audio_only
+                )
+                if result:
+                    file_path, info = result
+                    logger.info(f"[{platform}] Story yt-dlp MUVOFAQIYATLI!")
+                    return file_path, info
 
             except Exception as e:
                 err_str = str(e)
@@ -1310,27 +1276,16 @@ async def _download_non_youtube(url: str, quality: str, audio_only: bool) -> Opt
             label = "cookies" if use_cookies else "cookiesiz"
             logger.info(f"[{platform}] Yuklash {i}/{len(attempts)}: {label}")
 
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                if info is None:
-                    continue
+            result = await asyncio.to_thread(
+                _ytdlp_extract_and_get_path_sync, opts, url, output_path, audio_only
+            )
+            if result is None:
+                continue
 
-                file_path = ydl.prepare_filename(info)
-                if audio_only and config.download.ffmpeg_available:
-                    base_path = os.path.splitext(file_path)[0]
-                    mp3_path = base_path + ".mp3"
-                    if os.path.exists(mp3_path):
-                        file_path = mp3_path
+            file_path, info = result
 
-                if not os.path.exists(file_path):
-                    files = os.listdir(output_path)
-                    if files:
-                        file_path = os.path.join(output_path, files[0])
-                    else:
-                        continue
-
-                logger.info(f"[{platform}] Yuklash muvaffaqiyatli: {label}")
-                return file_path, info
+            logger.info(f"[{platform}] Yuklash muvaffaqiyatli: {label}")
+            return file_path, info
 
         except Exception as e:
             err_str = str(e)
@@ -1406,4 +1361,4 @@ def format_view_count(count: int) -> str:
         return f"{count / 1_000_000:.1f}M"
     if count >= 1_000:
         return f"{count / 1_000:.1f}K"
-    return str(count)
+    return str(count)   

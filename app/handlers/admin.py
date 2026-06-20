@@ -607,7 +607,7 @@ async def admin_settings(callback: CallbackQuery, state: FSMContext):
         f"{info_line('Rate limit', f'{config.rate_limit.downloads}/{config.rate_limit.period}s')}\n"
         f"{info_line('Cookie fayl', '✅ Mavjud' if os.path.exists(config.download.cookies_file) else '❌ Yo\\q')}\n"
     )
-    kb = admin_back_kb()
+    kb = admin_back_kb()    
     try:
         await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     except Exception:
